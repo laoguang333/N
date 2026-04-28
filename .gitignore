@@ -1,0 +1,9 @@
+/target/
+/.cargo-home/
+/data/
+/novels/
+/frontend/node_modules/
+/frontend/dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
