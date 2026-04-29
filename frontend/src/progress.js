@@ -1,6 +1,8 @@
 export const PROGRESS_CACHE_KEY = "txt-reader-progress";
 
 const CONFLICT_EPSILON = 0.005;
+const ZERO_RESET_PERCENT = 0.001;
+const START_RESET_PERCENT = 0.02;
 
 export function normalizeProgress(bookId, progress, fallback = {}) {
   if (!progress) {
@@ -25,11 +27,15 @@ export function progressKey(progress) {
   return `${progress.char_offset}:${Math.round((progress.percent || 0) * 10000)}:${progress.version ?? "local"}`;
 }
 
-export function savePayload(progress, baseVersion) {
+export function savePayload(progress, baseVersion, meta = {}) {
   return {
     char_offset: progress.char_offset,
     percent: progress.percent,
     base_version: baseVersion ?? null,
+    source: meta.source || "unknown",
+    client_id: meta.clientId || null,
+    session_id: meta.sessionId || null,
+    allow_backward: Boolean(meta.allowBackward),
   };
 }
 
@@ -64,6 +70,21 @@ export function isRemoteAhead(savedProgress, attemptedProgress) {
     return false;
   }
   return savedProgress.percent > attemptedProgress.percent + CONFLICT_EPSILON;
+}
+
+export function isSuspiciousLocalReset(nextProgress, previousProgress, options = {}) {
+  if (options.allowBackward || !nextProgress || !previousProgress) {
+    return false;
+  }
+
+  const hasReadingTrace = previousProgress.char_offset > 0 || previousProgress.percent > ZERO_RESET_PERCENT;
+  const zeroReset = hasReadingTrace && nextProgress.percent <= ZERO_RESET_PERCENT && nextProgress.char_offset === 0;
+  const startJump =
+    previousProgress.percent > START_RESET_PERCENT
+    && nextProgress.percent <= START_RESET_PERCENT
+    && previousProgress.percent > nextProgress.percent + START_RESET_PERCENT;
+
+  return zeroReset || startJump;
 }
 
 function clampPercent(value) {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::{HeaderMap, header},
     routing::{get, post, put},
 };
 use sqlx::{Row, SqlitePool};
@@ -172,9 +173,10 @@ async fn get_progress(
 async fn save_progress(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Json(payload): Json<SaveProgressRequest>,
 ) -> Result<Json<ReadingProgress>, AppError> {
-    require_book(&state.db, id).await?;
+    let (title, _) = require_book(&state.db, id).await?;
 
     if !payload.percent.is_finite() {
         return Err(AppError::BadRequest("percent must be finite".to_string()));
@@ -182,20 +184,43 @@ async fn save_progress(
 
     let char_offset = payload.char_offset.max(0);
     let percent = payload.percent.clamp(0.0, 1.0);
+    let source = payload.source.as_deref().unwrap_or("unknown");
+    let client_id = payload.client_id.as_deref().unwrap_or("unknown");
+    let session_id = payload.session_id.as_deref().unwrap_or("unknown");
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
 
     let current = fetch_progress(&state.db, id).await?;
     if let Some(current) = current.as_ref() {
         let stale_writer = payload.base_version != Some(current.version);
         let backward_write = percent + 0.005 < current.percent;
-        if stale_writer && backward_write {
+        let has_reading_trace = current.char_offset > 0 || current.percent > 0.001;
+        let suspicious_zero_reset = has_reading_trace && percent <= 0.001 && char_offset == 0;
+        let suspicious_start_reset =
+            current.percent > 0.02 && percent <= 0.02 && current.percent > percent + 0.02;
+        let allow_backward = payload.allow_backward.unwrap_or(false);
+        if (stale_writer && backward_write)
+            || (!allow_backward && (suspicious_zero_reset || suspicious_start_reset))
+        {
             tracing::warn!(
                 book_id = id,
+                title = %title,
+                source,
+                client_id,
+                session_id,
+                user_agent,
                 current_version = current.version,
                 base_version = payload.base_version,
                 current_percent = current.percent,
                 attempted_percent = percent,
                 current_offset = current.char_offset,
                 attempted_offset = char_offset,
+                stale_writer,
+                suspicious_zero_reset,
+                suspicious_start_reset,
+                allow_backward,
                 "ignored stale backward progress save"
             );
             return Ok(Json(current.clone()));
@@ -238,10 +263,16 @@ async fn save_progress(
         .expect("progress exists after save");
     tracing::info!(
         book_id = id,
+        title = %title,
+        source,
+        client_id,
+        session_id,
+        user_agent,
         version = saved.version,
         base_version = payload.base_version,
         percent = saved.percent,
         char_offset = saved.char_offset,
+        allow_backward = payload.allow_backward.unwrap_or(false),
         "saved reading progress"
     );
 
@@ -493,10 +524,15 @@ mod tests {
         let Json(first) = save_progress(
             State(fixture.state.clone()),
             Path(id),
+            HeaderMap::new(),
             Json(SaveProgressRequest {
                 char_offset: 100,
                 percent: 0.5,
                 base_version: None,
+                source: Some("test".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
             }),
         )
         .await
@@ -506,10 +542,15 @@ mod tests {
         let Json(second) = save_progress(
             State(fixture.state.clone()),
             Path(id),
+            HeaderMap::new(),
             Json(SaveProgressRequest {
                 char_offset: 180,
                 percent: 0.9,
                 base_version: Some(first.version),
+                source: Some("test".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
             }),
         )
         .await
@@ -517,13 +558,37 @@ mod tests {
         assert_eq!(second.version, 2);
         assert_eq!(second.percent, 0.9);
 
+        let Json(current_base_start_reset) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 20,
+                percent: 0.01,
+                base_version: Some(second.version),
+                source: Some("pagehide".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current_base_start_reset.version, second.version);
+        assert_eq!(current_base_start_reset.percent, second.percent);
+
         let Json(stale) = save_progress(
             State(fixture.state.clone()),
             Path(id),
+            HeaderMap::new(),
             Json(SaveProgressRequest {
                 char_offset: 10,
                 percent: 0.1,
                 base_version: Some(first.version),
+                source: Some("test".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
             }),
         )
         .await
@@ -531,6 +596,81 @@ mod tests {
         assert_eq!(stale.version, second.version);
         assert_eq!(stale.char_offset, second.char_offset);
         assert_eq!(stale.percent, second.percent);
+
+        let Json(zero_reset) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 0,
+                percent: 0.0,
+                base_version: Some(second.version),
+                source: Some("pagehide".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(zero_reset.version, second.version);
+        assert_eq!(zero_reset.percent, second.percent);
+
+        let Json(explicit_seek) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 0,
+                percent: 0.0,
+                base_version: Some(second.version),
+                source: Some("seek".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: Some(true),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(explicit_seek.version, second.version + 1);
+        assert_eq!(explicit_seek.percent, 0.0);
+
+        let Json(tiny_progress) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 20,
+                percent: 0.0005,
+                base_version: Some(explicit_seek.version),
+                source: Some("scroll".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tiny_progress.version, explicit_seek.version + 1);
+
+        let Json(tiny_zero_reset) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 0,
+                percent: 0.0,
+                base_version: Some(tiny_progress.version),
+                source: Some("pagehide".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tiny_zero_reset.version, tiny_progress.version);
+        assert_eq!(tiny_zero_reset.percent, tiny_progress.percent);
 
         fixture.cleanup().await;
     }

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { chooseProgressForOpen, isRemoteAhead, savePayload } from "./progress";
+import {
+  chooseProgressForOpen,
+  isRemoteAhead,
+  isSuspiciousLocalReset,
+  savePayload,
+} from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 describe("reader helpers", () => {
@@ -79,12 +84,54 @@ describe("reader helpers", () => {
   });
 
   test("progress payload carries base version and detects remote-ahead conflicts", () => {
-    expect(savePayload({ char_offset: 20, percent: 0.2 }, 3)).toEqual({
+    expect(savePayload({ char_offset: 20, percent: 0.2 }, 3, {
+      source: "scroll",
+      clientId: "client",
+      sessionId: "session",
+    })).toEqual({
       char_offset: 20,
       percent: 0.2,
       base_version: 3,
+      source: "scroll",
+      client_id: "client",
+      session_id: "session",
+      allow_backward: false,
     });
     expect(isRemoteAhead({ percent: 0.8 }, { percent: 0.2 })).toBe(true);
     expect(isRemoteAhead({ percent: 0.2 }, { percent: 0.8 })).toBe(false);
+  });
+
+  test("detects suspicious local reset snapshots unless explicitly allowed", () => {
+    expect(
+      isSuspiciousLocalReset(
+        { char_offset: 0, percent: 0 },
+        { char_offset: 3000, percent: 0.2 },
+      ),
+    ).toBe(true);
+    expect(
+      isSuspiciousLocalReset(
+        { char_offset: 0, percent: 0 },
+        { char_offset: 25, percent: 0.0005 },
+      ),
+    ).toBe(true);
+    expect(
+      isSuspiciousLocalReset(
+        { char_offset: 900, percent: 0.01 },
+        { char_offset: 3000, percent: 0.2 },
+      ),
+    ).toBe(true);
+    expect(
+      isSuspiciousLocalReset(
+        { char_offset: 9000, percent: 0.2 },
+        { char_offset: 30000, percent: 0.5 },
+      ),
+    ).toBe(false);
+    expect(
+      isSuspiciousLocalReset(
+        { char_offset: 0, percent: 0 },
+        { char_offset: 3000, percent: 0.2 },
+        { allowBackward: true },
+      ),
+    ).toBe(false);
   });
 });

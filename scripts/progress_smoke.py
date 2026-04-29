@@ -24,27 +24,37 @@ def main() -> int:
     print(f"testing book {book_id}")
     print(f"original: {compact(original)}")
 
-    first = client.put_progress(book_id, 100, 0.21, original.get("version") if original else None)
-    second = client.put_progress(book_id, 500, 0.77, first["version"])
-    stale = client.put_progress(book_id, 10, 0.05, first["version"])
+    first = client.put_progress(book_id, 100, 0.21, original.get("version") if original else None, "smoke_first")
+    second = client.put_progress(book_id, 500, 0.77, first["version"], "smoke_second")
+    stale = client.put_progress(book_id, 10, 0.05, first["version"], "smoke_stale")
+    zero_reset = client.put_progress(book_id, 0, 0.0, second["version"], "smoke_zero_reset")
+    near_start = client.put_progress(book_id, 20, 0.01, second["version"], "smoke_near_start")
 
     if stale["version"] != second["version"] or abs(stale["percent"] - second["percent"]) > 0.0001:
         raise SystemExit(f"stale backward write overwrote progress: {compact(stale)}")
+    if zero_reset["version"] != second["version"] or abs(zero_reset["percent"] - second["percent"]) > 0.0001:
+        raise SystemExit(f"implicit zero reset overwrote progress: {compact(zero_reset)}")
+    if near_start["version"] != second["version"] or abs(near_start["percent"] - second["percent"]) > 0.0001:
+        raise SystemExit(f"implicit near-start reset overwrote progress: {compact(near_start)}")
 
-    restore_base = stale["version"]
+    restore_base = near_start["version"]
     if original:
         restored = client.put_progress(
             book_id,
             original["char_offset"],
             original["percent"],
             restore_base,
+            "smoke_restore",
+            allow_backward=True,
         )
     else:
-        restored = client.put_progress(book_id, 0, 0, restore_base)
+        restored = client.put_progress(book_id, 0, 0, restore_base, "smoke_restore", allow_backward=True)
 
     print(f"first:    {compact(first)}")
     print(f"second:   {compact(second)}")
     print(f"stale:    {compact(stale)}")
+    print(f"zero:     {compact(zero_reset)}")
+    print(f"near:     {compact(near_start)}")
     print(f"restored: {compact(restored)}")
     print("ok")
     return 0
@@ -69,7 +79,15 @@ class Client:
     def get(self, path: str):
         return self.request("GET", path)
 
-    def put_progress(self, book_id: int, char_offset: int, percent: float, base_version: int | None):
+    def put_progress(
+        self,
+        book_id: int,
+        char_offset: int,
+        percent: float,
+        base_version: int | None,
+        source: str,
+        allow_backward: bool = False,
+    ):
         return self.request(
             "PUT",
             f"/api/books/{book_id}/progress",
@@ -77,6 +95,10 @@ class Client:
                 "char_offset": char_offset,
                 "percent": percent,
                 "base_version": base_version,
+                "source": source,
+                "client_id": "progress-smoke",
+                "session_id": "progress-smoke",
+                "allow_backward": allow_backward,
             },
         )
 

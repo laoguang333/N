@@ -29,6 +29,7 @@ import {
   PROGRESS_CACHE_KEY,
   chooseProgressForOpen,
   isRemoteAhead,
+  isSuspiciousLocalReset,
   normalizeProgress,
   progressKey,
   savePayload,
@@ -36,6 +37,9 @@ import {
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 const STORAGE_KEY = "txt-reader-settings";
+const CLIENT_ID_KEY = "txt-reader-client-id";
+const clientId = loadClientId();
+const sessionId = createId();
 
 const route = reactive({
   name: "shelf",
@@ -151,19 +155,45 @@ function loadSettings() {
   return parseSettings(localStorage.getItem(STORAGE_KEY));
 }
 
+function loadClientId() {
+  const existing = localStorage.getItem(CLIENT_ID_KEY);
+  if (existing) {
+    return existing;
+  }
+  const next = createId();
+  localStorage.setItem(CLIENT_ID_KEY, next);
+  return next;
+}
+
+function createId() {
+  if (globalThis.crypto?.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function progressMeta(source, options = {}) {
+  return {
+    source,
+    clientId,
+    sessionId,
+    allowBackward: Boolean(options.allowBackward),
+  };
+}
+
 function parseHash() {
   const match = window.location.hash.match(/^#\/reader\/(\d+)/);
   if (match) {
     const nextBookId = Number(match[1]);
     if (route.name === "reader" && route.bookId && route.bookId !== nextBookId) {
-      saveProgressInBackground();
+      saveProgressInBackground("route_change", { reuseCurrent: true });
     }
     route.name = "reader";
     route.bookId = nextBookId;
   } else {
     const shouldRestoreShelf = route.name === "reader";
     if (shouldRestoreShelf) {
-      saveProgressInBackground();
+      saveProgressInBackground("route_change", { reuseCurrent: true });
     }
     route.name = "shelf";
     route.bookId = null;
@@ -274,9 +304,9 @@ async function openBook(bookId) {
     }, 250);
     if (shouldSync) {
       cacheProgress(bookId, restoredProgress, { dirty: true, baseVersion: progressBaseVersion });
-      scheduleProgressSave(250, { force: true });
+      scheduleProgressSave(250, { force: true, source: "open_sync" });
     } else if (!serverProgress) {
-      scheduleProgressSave(300, { force: true });
+      scheduleProgressSave(300, { force: true, source: "open_mark" });
     }
   } catch (error) {
     reader.error = error.message;
@@ -386,7 +416,7 @@ function toggleReaderControls() {
 
 function onVisibilityChange() {
   if (document.visibilityState === "hidden") {
-    flushProgress();
+    flushProgress("visibility_hidden");
   }
 }
 
@@ -454,6 +484,10 @@ function snapshotProgress(options = {}) {
   }
 
   const payload = progressPayload();
+  if (isSuspiciousLocalReset(payload, reader.progress, options)) {
+    return reader.progress;
+  }
+
   const progress = cacheProgress(reader.book.book_id, payload, {
     dirty: options.dirty ?? true,
     baseVersion: progressBaseVersion,
@@ -464,13 +498,13 @@ function snapshotProgress(options = {}) {
   return progress;
 }
 
-function saveProgressInBackground() {
-  const progress = snapshotProgress();
+function saveProgressInBackground(source = "background", options = {}) {
+  const progress = options.reuseCurrent ? reader.progress : snapshotProgress({ source });
   if (!progress || !reader.book) {
     return;
   }
 
-  const payload = savePayload(progress, progressBaseVersion);
+  const payload = savePayload(progress, progressBaseVersion, progressMeta(source));
   if (!saveProgressBeacon(reader.book.book_id, payload)) {
     void saveProgressKeepalive(reader.book.book_id, payload)
       .then((saved) => {
@@ -481,7 +515,8 @@ function saveProgressInBackground() {
 }
 
 async function saveProgressNow(options = {}) {
-  const progress = snapshotProgress();
+  const source = options.source || "debounced";
+  const progress = options.reuseCurrent ? reader.progress : snapshotProgress(options);
   if (!progress || !reader.book) {
     return null;
   }
@@ -504,7 +539,7 @@ async function saveProgressNow(options = {}) {
   try {
     const saved = await saveProgress(
       reader.book.book_id,
-      savePayload(progress, progressBaseVersion),
+      savePayload(progress, progressBaseVersion, progressMeta(source, options)),
       options,
     );
     return applySavedProgress(saved, progress);
@@ -567,11 +602,11 @@ function onReaderScroll() {
   if (progressFrame === null) {
     progressFrame = window.requestAnimationFrame(() => {
       progressFrame = null;
-      snapshotProgress();
+      snapshotProgress({ source: "scroll" });
     });
   }
   window.clearTimeout(scrollTimer);
-  scrollTimer = window.setTimeout(() => scheduleProgressSave(450), 120);
+  scrollTimer = window.setTimeout(() => scheduleProgressSave(450, { source: "scroll" }), 120);
 }
 
 function scheduleProgressSave(delay = 650, options = {}) {
@@ -584,16 +619,16 @@ function periodicProgressSave() {
     return;
   }
 
-  const progress = snapshotProgress();
+  const progress = snapshotProgress({ source: "periodic" });
   if (progressKey(progress) !== lastServerProgressKey) {
-    void saveProgressNow({ quiet: true });
+    void saveProgressNow({ quiet: true, source: "periodic" });
   }
 }
 
 function onReaderInteractionEnd() {
   if (canSaveReaderProgress()) {
-    snapshotProgress();
-    scheduleProgressSave(300);
+    snapshotProgress({ source: "interaction_end" });
+    scheduleProgressSave(300, { source: "interaction_end" });
   }
 }
 
@@ -663,8 +698,8 @@ function seekProgress(event) {
   reader.pendingSeekPercent = value;
   window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;
-  snapshotProgress();
-  scheduleProgressSave(250);
+  snapshotProgress({ source: "seek", allowBackward: true });
+  scheduleProgressSave(250, { source: "seek", force: true, allowBackward: true });
 }
 
 function startSeek() {
@@ -679,16 +714,16 @@ function endSeek() {
   }, 1200);
 }
 
-function flushProgress() {
+function flushProgress(source = "flush") {
   if (canSaveReaderProgress()) {
     window.clearTimeout(saveTimer);
-    saveProgressInBackground();
+    saveProgressInBackground(typeof source === "string" ? source : "flush", { reuseCurrent: true });
   }
 }
 
 async function goShelf() {
   window.clearTimeout(saveTimer);
-  await saveProgressNow({ quiet: true });
+  await saveProgressNow({ quiet: true, source: "go_shelf", reuseCurrent: true });
   window.location.hash = "#/";
 }
 
