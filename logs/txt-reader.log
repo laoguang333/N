@@ -1,2 +1,12 @@
 
 --- txt-reader restart ---
+
+--- txt-reader restart ---
+[2m2026-04-29T13:44:26.897685Z[0m [33m WARN[0m [2mtxt_reader::api[0m[2m:[0m ignored stale backward progress save [3mbook_id[0m[2m=[0m103 [3mcurrent_version[0m[2m=[0m31 [3mbase_version[0m[2m=[0m30 [3mcurrent_percent[0m[2m=[0m0.77 [3mattempted_percent[0m[2m=[0m0.05 [3mcurrent_offset[0m[2m=[0m500 [3mattempted_offset[0m[2m=[0m10
+
+--- txt-reader restart with RUST_LOG ---
+[2m2026-04-29T13:44:58.318974Z[0m [32m INFO[0m [2mtxt_reader[0m[2m:[0m listening on https://0.0.0.0:234
+[2m2026-04-29T13:45:17.692563Z[0m [32m INFO[0m [2mtxt_reader::api[0m[2m:[0m saved reading progress [3mbook_id[0m[2m=[0m103 [3mversion[0m[2m=[0m33 [3mbase_version[0m[2m=[0m32 [3mpercent[0m[2m=[0m0.21 [3mchar_offset[0m[2m=[0m100
+[2m2026-04-29T13:45:17.698290Z[0m [32m INFO[0m [2mtxt_reader::api[0m[2m:[0m saved reading progress [3mbook_id[0m[2m=[0m103 [3mversion[0m[2m=[0m34 [3mbase_version[0m[2m=[0m33 [3mpercent[0m[2m=[0m0.77 [3mchar_offset[0m[2m=[0m500
+[2m2026-04-29T13:45:17.702371Z[0m [33m WARN[0m [2mtxt_reader::api[0m[2m:[0m ignored stale backward progress save [3mbook_id[0m[2m=[0m103 [3mcurrent_version[0m[2m=[0m34 [3mbase_version[0m[2m=[0m33 [3mcurrent_percent[0m[2m=[0m0.77 [3mattempted_percent[0m[2m=[0m0.05 [3mcurrent_offset[0m[2m=[0m500 [3mattempted_offset[0m[2m=[0m10
+[2m2026-04-29T13:45:17.707426Z[0m [32m INFO[0m [2mtxt_reader::api[0m[2m:[0m saved reading progress [3mbook_id[0m[2m=[0m103 [3mversion[0m[2m=[0m35 [3mbase_version[0m[2m=[0m34 [3mpercent[0m[2m=[0m0.0 [3mchar_offset[0m[2m=[0m0

@@ -188,6 +188,16 @@ async fn save_progress(
         let stale_writer = payload.base_version != Some(current.version);
         let backward_write = percent + 0.005 < current.percent;
         if stale_writer && backward_write {
+            tracing::warn!(
+                book_id = id,
+                current_version = current.version,
+                base_version = payload.base_version,
+                current_percent = current.percent,
+                attempted_percent = percent,
+                current_offset = current.char_offset,
+                attempted_offset = char_offset,
+                "ignored stale backward progress save"
+            );
             return Ok(Json(current.clone()));
         }
     }
@@ -223,11 +233,19 @@ async fn save_progress(
         .await?;
     }
 
-    Ok(Json(
-        fetch_progress(&state.db, id)
-            .await?
-            .expect("progress exists after save"),
-    ))
+    let saved = fetch_progress(&state.db, id)
+        .await?
+        .expect("progress exists after save");
+    tracing::info!(
+        book_id = id,
+        version = saved.version,
+        base_version = payload.base_version,
+        percent = saved.percent,
+        char_offset = saved.char_offset,
+        "saved reading progress"
+    );
+
+    Ok(Json(saved))
 }
 
 async fn save_rating(

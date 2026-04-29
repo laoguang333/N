@@ -3,6 +3,7 @@
 /data/
 /novels/
 /certs/
+/logs/
 /frontend/node_modules/
 /frontend/dist/
 *.sqlite
