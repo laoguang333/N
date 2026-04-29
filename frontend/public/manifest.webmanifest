@@ -1,0 +1,20 @@
+{
+  "name": "TXT Reader",
+  "short_name": "TXT Reader",
+  "description": "家庭内网 TXT 小说阅读器",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
+  "background_color": "#f5f2ea",
+  "theme_color": "#f5f2ea",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

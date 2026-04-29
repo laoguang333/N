@@ -1,0 +1,6 @@
+listen = "0.0.0.0:3000"
+database_path = "data/reader.sqlite"
+library_dirs = ["E:\\Videos\\小说"]
+scan_recursive = false
+scan_on_startup = false
+

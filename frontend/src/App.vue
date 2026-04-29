@@ -53,6 +53,7 @@ const reader = reactive({
   book: null,
   paragraphs: [],
   progress: null,
+  visiblePercent: 0,
   settingsOpen: false,
 });
 
@@ -64,6 +65,8 @@ let shelfTimer = null;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
+const readerProgressValue = computed(() => Math.round(reader.visiblePercent * 1000));
+const readerProgressLabel = computed(() => `${Math.round(reader.visiblePercent * 100)}%`);
 
 watch(
   () => ({ ...settings }),
@@ -185,6 +188,7 @@ async function openBook(bookId) {
   reader.book = null;
   reader.paragraphs = [];
   reader.progress = null;
+  reader.visiblePercent = 0;
   window.scrollTo({ top: 0 });
 
   try {
@@ -194,9 +198,11 @@ async function openBook(bookId) {
     ]);
     reader.book = content;
     reader.progress = progress;
+    reader.visiblePercent = progress?.percent || 0;
     reader.paragraphs = buildParagraphs(content.content);
     await nextTick();
     restoreScroll(progress?.char_offset || 0);
+    window.requestAnimationFrame(updateVisibleProgress);
   } catch (error) {
     reader.error = error.message;
   } finally {
@@ -230,6 +236,7 @@ function onReaderScroll() {
     return;
   }
 
+  updateVisibleProgress();
   window.clearTimeout(scrollTimer);
   scrollTimer = window.setTimeout(scheduleProgressSave, 160);
 }
@@ -240,11 +247,19 @@ function scheduleProgressSave() {
 }
 
 function progressPayload() {
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
   return {
     char_offset: currentOffset(),
-    percent: Math.min(1, Math.max(0, window.scrollY / maxScroll)),
+    percent: currentScrollPercent(),
   };
+}
+
+function currentScrollPercent() {
+  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  return Math.min(1, Math.max(0, window.scrollY / maxScroll));
+}
+
+function updateVisibleProgress() {
+  reader.visiblePercent = currentScrollPercent();
 }
 
 function currentOffset() {
@@ -272,7 +287,9 @@ async function persistProgress(options = {}) {
   reader.saving = true;
 
   try {
-    reader.progress = await saveProgress(reader.book.book_id, progressPayload(), options);
+    const payload = progressPayload();
+    reader.visiblePercent = payload.percent;
+    reader.progress = await saveProgress(reader.book.book_id, payload, options);
   } catch (error) {
     if (!options.keepalive) {
       reader.error = error.message;
@@ -280,6 +297,14 @@ async function persistProgress(options = {}) {
   } finally {
     reader.saving = false;
   }
+}
+
+function seekProgress(event) {
+  const value = Number(event.target.value) / 1000;
+  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  window.scrollTo({ top: maxScroll * value, behavior: "auto" });
+  reader.visiblePercent = value;
+  scheduleProgressSave();
 }
 
 function flushProgress() {
@@ -449,6 +474,19 @@ async function updateRating(book, rating) {
           {{ paragraph.text }}
         </p>
       </article>
+
+      <div v-if="reader.book && !reader.loading" class="reader-progress">
+        <input
+          type="range"
+          min="0"
+          max="1000"
+          step="1"
+          :value="readerProgressValue"
+          :aria-label="`阅读进度 ${readerProgressLabel}`"
+          @input="seekProgress"
+        />
+        <span>{{ readerProgressLabel }}</span>
+      </div>
 
       <aside v-if="reader.settingsOpen" class="settings-panel">
         <div class="settings-header">

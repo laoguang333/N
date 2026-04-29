@@ -15,6 +15,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  overscroll-behavior-y: contain;
 }
 
 button,
@@ -319,7 +320,7 @@ h1 {
 .reader-content {
   width: min(760px, 100%);
   margin: 0 auto;
-  padding: 24px 20px 44vh;
+  padding: 24px 20px calc(44vh + 44px);
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
 }
@@ -328,6 +329,34 @@ h1 {
   margin: 0 0 var(--reader-paragraph-spacing);
   overflow-wrap: anywhere;
   text-align: justify;
+}
+
+.reader-progress {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 10px;
+  min-height: calc(38px + env(safe-area-inset-bottom));
+  padding: 6px 14px max(6px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.reader-progress input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.reader-progress span {
+  font-size: 13px;
+  text-align: right;
 }
 
 .settings-panel {
