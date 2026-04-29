@@ -350,7 +350,7 @@ function restoreScroll(progress) {
     return;
   }
 
-  if (shouldRestoreByPercent(progress)) {
+  if (Number.isFinite(progress.percent)) {
     restoreScrollPercent(progress.percent || 0);
     return;
   }
@@ -363,24 +363,7 @@ function restoreScroll(progress) {
     return;
   }
 
-  restoreScrollPercent(progress.percent || 0);
-}
-
-function shouldRestoreByPercent(progress) {
-  if (!Number.isFinite(progress?.percent) || progress.percent <= 0) {
-    return false;
-  }
-
-  const target = readerRoot.value?.querySelector(`[data-offset="${progress.char_offset}"]`)
-    || nearestParagraph(progress.char_offset);
-  if (!target) {
-    return true;
-  }
-
-  const maxScroll = maxScrollTop();
-  const targetScroll = window.scrollY + target.getBoundingClientRect().top - 88;
-  const offsetPercent = Math.min(1, Math.max(0, targetScroll / maxScroll));
-  return Math.abs(offsetPercent - progress.percent) > 0.08;
+  restoreScrollPercent(0);
 }
 
 function restoreScrollPercent(percent) {
@@ -662,6 +645,12 @@ function selectSearchResult(result) {
   reader.activeSearchId = result.id;
   reader.controlsVisible = true;
   scrollToSearchResult(result);
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      snapshotProgress({ source: "search", allowBackward: true });
+      scheduleProgressSave(250, { source: "search", allowBackward: true });
+    });
+  });
   queueSearchResultReveal(result.id);
 }
 
