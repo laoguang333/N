@@ -35,6 +35,7 @@ import {
   savePayload,
 } from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
+import { highlightParagraph, searchParagraphs } from "./search";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -67,6 +68,10 @@ const reader = reactive({
   error: "",
   book: null,
   paragraphs: [],
+  searchOpen: false,
+  searchQuery: "",
+  searchResults: [],
+  activeSearchId: "",
   progress: null,
   visiblePercent: 0,
   controlsVisible: false,
@@ -272,6 +277,10 @@ async function openBook(bookId) {
   reader.controlsVisible = false;
   reader.progressSeeking = false;
   reader.pendingSeekPercent = null;
+  reader.searchOpen = false;
+  reader.searchQuery = "";
+  reader.searchResults = [];
+  reader.activeSearchId = "";
   progressBaseVersion = null;
   lastServerProgressKey = "";
   restoreSavingBlocked = true;
@@ -294,6 +303,9 @@ async function openBook(bookId) {
     reader.progress = restoredProgress;
     reader.visiblePercent = restoredProgress?.percent || 0;
     reader.paragraphs = buildParagraphs(content.content);
+    reader.searchResults = [];
+    reader.activeSearchId = "";
+    reader.controlsVisible = window.matchMedia("(min-width: 760px)").matches;
     await nextTick();
     restoreScroll(restoredProgress);
     await afterNextPaint();
@@ -412,6 +424,20 @@ function toggleReaderControls() {
     return;
   }
   reader.controlsVisible = !reader.controlsVisible;
+}
+
+function toggleSearchPanel() {
+  if (!reader.book || reader.loading) {
+    return;
+  }
+  reader.searchOpen = !reader.searchOpen;
+  if (reader.searchOpen) {
+    reader.controlsVisible = true;
+  }
+}
+
+function closeSearchPanel() {
+  reader.searchOpen = false;
 }
 
 function onVisibilityChange() {
@@ -653,6 +679,51 @@ function updateVisibleProgress() {
   reader.visiblePercent = currentScrollPercent();
 }
 
+function updateSearchResults() {
+  if (!reader.book) {
+    reader.searchResults = [];
+    reader.activeSearchId = "";
+    return;
+  }
+
+  reader.searchResults = searchParagraphs(reader.paragraphs, reader.searchQuery);
+  if (!reader.searchResults.some((item) => item.id === reader.activeSearchId)) {
+    reader.activeSearchId = reader.searchResults[0]?.id || "";
+  }
+}
+
+watch(
+  () => [reader.searchQuery, reader.paragraphs.length],
+  () => {
+    updateSearchResults();
+  },
+);
+
+function selectSearchResult(result) {
+  reader.activeSearchId = result.id;
+  reader.controlsVisible = true;
+  scrollToSearchResult(result);
+}
+
+function scrollToSearchResult(result) {
+  if (!result) {
+    return;
+  }
+
+  const target = readerRoot.value?.querySelector(`[data-offset="${result.paragraphOffset}"]`)
+    || nearestParagraph(result.paragraphOffset);
+  if (target) {
+    target.scrollIntoView({ block: "start" });
+    window.requestAnimationFrame(() => {
+      updateVisibleProgress();
+    });
+  }
+}
+
+function paragraphMatches(offset) {
+  return reader.searchResults.filter((item) => item.paragraphOffset === offset);
+}
+
 function currentOffset() {
   const nodes = [...(readerRoot.value?.querySelectorAll("[data-offset]") || [])];
   const topLine = 88;
@@ -850,16 +921,21 @@ async function updateRating(book, rating) {
 
     <section v-else class="reader-view" @scroll.passive="onReaderScroll">
       <header class="reader-toolbar" :class="{ 'is-visible': reader.controlsVisible || reader.settingsOpen }">
-        <button class="icon-button" type="button" @click="goShelf" title="返回书架">
+        <button class="icon-button" type="button" @click="goShelf" title="Back">
           <ArrowLeft :size="22" />
         </button>
         <div class="reader-title">
-          <strong>{{ reader.book?.title || "读取中" }}</strong>
-          <span v-if="reader.saving"><Check :size="14" /> 已保存</span>
+          <strong>{{ reader.book?.title || "Reading" }}</strong>
+          <span v-if="reader.saving"><Check :size="14" /> Saved</span>
         </div>
-        <button class="icon-button" type="button" @click="reader.settingsOpen = true" title="阅读设置">
-          <Settings :size="22" />
-        </button>
+        <div class="toolbar-actions">
+          <button class="icon-button" type="button" @click="toggleSearchPanel" title="Search">
+            <Search :size="22" />
+          </button>
+          <button class="icon-button" type="button" @click="reader.settingsOpen = true" title="Settings">
+            <Settings :size="22" />
+          </button>
+        </div>
       </header>
 
       <p v-if="reader.error" class="error reader-error">{{ reader.error }}</p>
@@ -880,8 +956,23 @@ async function updateRating(book, rating) {
         @click="toggleReaderControls"
         @scroll.passive="onReaderScroll"
       >
-        <p v-for="paragraph in reader.paragraphs" :key="paragraph.offset" :data-offset="paragraph.offset">
-          {{ paragraph.text }}
+        <p
+          v-for="paragraph in reader.paragraphs"
+          :key="paragraph.offset"
+          :data-offset="paragraph.offset"
+          :class="{ 'is-match-target': paragraphMatches(paragraph.offset).some((item) => item.id === reader.activeSearchId) }"
+        >
+          <template
+            v-for="(part, index) in highlightParagraph(
+              paragraph.text,
+              paragraphMatches(paragraph.offset),
+              reader.activeSearchId,
+            )"
+            :key="`${paragraph.offset}-${index}`"
+          >
+            <mark v-if="part.highlight" :class="{ 'is-active-match': part.active }">{{ part.text }}</mark>
+            <span v-else>{{ part.text }}</span>
+          </template>
         </p>
       </article>
 
@@ -938,6 +1029,42 @@ async function updateRating(book, rating) {
           </button>
           <button type="button" :class="{ active: settings.theme === 'night' }" @click="settings.theme = 'night'">
             <Moon :size="18" /> 夜间
+          </button>
+        </div>
+      </aside>
+
+      <aside v-if="reader.searchOpen" class="search-panel">
+        <div class="search-panel-header">
+          <strong>????</strong>
+          <button class="icon-button" type="button" @click="closeSearchPanel" title="??">
+            <X :size="20" />
+          </button>
+        </div>
+
+        <label class="search-input">
+          <Search :size="18" />
+          <input
+            v-model="reader.searchQuery"
+            type="search"
+            placeholder="??????????????"
+          />
+        </label>
+
+        <p v-if="reader.searchQuery && reader.searchResults.length === 0" class="search-empty">
+          ????????
+        </p>
+
+        <div v-else class="search-result-list">
+          <button
+            v-for="result in reader.searchResults"
+            :key="result.id"
+            class="search-result"
+            type="button"
+            :class="{ active: result.id === reader.activeSearchId }"
+            @click="selectSearchResult(result)"
+          >
+            <span class="search-result-percent">{{ Math.round(result.percent * 100) }}%</span>
+            <span class="search-result-text">{{ result.text }}</span>
           </button>
         </div>
       </aside>
