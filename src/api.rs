@@ -77,6 +77,7 @@ async fn list_books(
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
+            p.version AS progress_version,
             p.updated_at AS progress_updated_at
         FROM books b
         LEFT JOIN reading_progress p ON p.book_id = b.id
@@ -127,6 +128,7 @@ async fn fetch_book_summary(db: &SqlitePool, id: i64) -> Result<BookSummary, App
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
+            p.version AS progress_version,
             p.updated_at AS progress_updated_at
         FROM books b
         LEFT JOIN reading_progress p ON p.book_id = b.id
@@ -164,14 +166,7 @@ async fn get_progress(
 ) -> Result<Json<Option<ReadingProgress>>, AppError> {
     require_book(&state.db, id).await?;
 
-    let row = sqlx::query(
-        "SELECT book_id, char_offset, percent, updated_at FROM reading_progress WHERE book_id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
-
-    Ok(Json(row.map(progress_from_row).transpose()?))
+    Ok(Json(fetch_progress(&state.db, id).await?))
 }
 
 async fn save_progress(
@@ -188,30 +183,51 @@ async fn save_progress(
     let char_offset = payload.char_offset.max(0);
     let percent = payload.percent.clamp(0.0, 1.0);
 
-    sqlx::query(
-        r#"
-        INSERT INTO reading_progress (book_id, char_offset, percent)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(book_id) DO UPDATE SET
-            char_offset = excluded.char_offset,
-            percent = excluded.percent,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        "#,
-    )
-    .bind(id)
-    .bind(char_offset)
-    .bind(percent)
-    .execute(&state.db)
-    .await?;
+    let current = fetch_progress(&state.db, id).await?;
+    if let Some(current) = current.as_ref() {
+        let stale_writer = payload.base_version != Some(current.version);
+        let backward_write = percent + 0.005 < current.percent;
+        if stale_writer && backward_write {
+            return Ok(Json(current.clone()));
+        }
+    }
 
-    let row = sqlx::query(
-        "SELECT book_id, char_offset, percent, updated_at FROM reading_progress WHERE book_id = ?1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+    if current.is_some() {
+        sqlx::query(
+            r#"
+            UPDATE reading_progress
+            SET
+                char_offset = ?2,
+                percent = ?3,
+                version = version + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE book_id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(char_offset)
+        .bind(percent)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO reading_progress (book_id, char_offset, percent, version)
+            VALUES (?1, ?2, ?3, 1)
+            "#,
+        )
+        .bind(id)
+        .bind(char_offset)
+        .bind(percent)
+        .execute(&state.db)
+        .await?;
+    }
 
-    Ok(Json(progress_from_row(row)?))
+    Ok(Json(
+        fetch_progress(&state.db, id)
+            .await?
+            .expect("progress exists after save"),
+    ))
 }
 
 async fn save_rating(
@@ -255,6 +271,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
             book_id: id,
             char_offset,
             percent: row.try_get("progress_percent")?,
+            version: row.try_get("progress_version")?,
             updated_at: row.try_get("progress_updated_at")?,
         }),
         None => None,
@@ -280,8 +297,20 @@ fn progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadingProgress, sq
         book_id: row.try_get("book_id")?,
         char_offset: row.try_get("char_offset")?,
         percent: row.try_get("percent")?,
+        version: row.try_get("version")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+async fn fetch_progress(db: &SqlitePool, id: i64) -> Result<Option<ReadingProgress>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT book_id, char_offset, percent, version, updated_at FROM reading_progress WHERE book_id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    row.map(progress_from_row).transpose()
 }
 
 fn normalize_status(status: Option<String>) -> Result<Option<String>, AppError> {
@@ -334,7 +363,7 @@ mod tests {
         AppState,
         config::Config,
         db::{connect_db, migrate},
-        models::{BookListQuery, SaveRatingRequest},
+        models::{BookListQuery, SaveProgressRequest, SaveRatingRequest},
     };
 
     use super::*;
@@ -413,6 +442,56 @@ mod tests {
         .unwrap();
         assert_eq!(reading.len(), 1);
         assert_eq!(reading[0].title, "Beta");
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn save_progress_versions_prevent_stale_backward_overwrite() {
+        let fixture = TestFixture::new("progress-version").await;
+        let id = fixture.insert_book("Book", 0.0, None).await;
+
+        let Json(first) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveProgressRequest {
+                char_offset: 100,
+                percent: 0.5,
+                base_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.version, 1);
+
+        let Json(second) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveProgressRequest {
+                char_offset: 180,
+                percent: 0.9,
+                base_version: Some(first.version),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.version, 2);
+        assert_eq!(second.percent, 0.9);
+
+        let Json(stale) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveProgressRequest {
+                char_offset: 10,
+                percent: 0.1,
+                base_version: Some(first.version),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale.version, second.version);
+        assert_eq!(stale.char_offset, second.char_offset);
+        assert_eq!(stale.percent, second.percent);
 
         fixture.cleanup().await;
     }

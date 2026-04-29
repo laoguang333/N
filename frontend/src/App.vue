@@ -25,10 +25,17 @@ import {
   saveRating,
   scanLibrary,
 } from "./api";
+import {
+  PROGRESS_CACHE_KEY,
+  chooseProgressForOpen,
+  isRemoteAhead,
+  normalizeProgress,
+  progressKey,
+  savePayload,
+} from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 const STORAGE_KEY = "txt-reader-settings";
-const PROGRESS_CACHE_KEY = "txt-reader-progress";
 
 const route = reactive({
   name: "shelf",
@@ -70,9 +77,11 @@ let saveTimer = null;
 let scrollTimer = null;
 let shelfTimer = null;
 let periodicSaveTimer = null;
+let progressFrame = null;
 let saveInFlight = false;
 let queuedServerSave = false;
 let lastServerProgressKey = "";
+let progressBaseVersion = null;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -123,6 +132,9 @@ onBeforeUnmount(() => {
   window.clearTimeout(scrollTimer);
   window.clearTimeout(shelfTimer);
   window.clearInterval(periodicSaveTimer);
+  if (progressFrame) {
+    window.cancelAnimationFrame(progressFrame);
+  }
 });
 
 watch(
@@ -229,6 +241,8 @@ async function openBook(bookId) {
   reader.controlsVisible = false;
   reader.progressSeeking = false;
   reader.pendingSeekPercent = null;
+  progressBaseVersion = null;
+  lastServerProgressKey = "";
   window.scrollTo({ top: 0 });
 
   try {
@@ -236,8 +250,14 @@ async function openBook(bookId) {
       getBookContent(bookId),
       getProgress(bookId),
     ]);
-    lastServerProgressKey = progressKey(progress);
-    const restoredProgress = newestProgress(progress, loadCachedProgress(bookId));
+    const serverProgress = normalizeProgress(bookId, progress, { dirty: false });
+    const { progress: restoredProgress, shouldSync } = chooseProgressForOpen(
+      serverProgress,
+      loadCachedProgress(bookId),
+      bookId,
+    );
+    progressBaseVersion = serverProgress?.version ?? null;
+    lastServerProgressKey = progressKey(serverProgress);
     reader.book = content;
     reader.progress = restoredProgress;
     reader.visiblePercent = restoredProgress?.percent || 0;
@@ -247,8 +267,9 @@ async function openBook(bookId) {
     await afterNextPaint();
     updateVisibleProgress();
     reader.loading = false;
-    if (progressKey(restoredProgress) !== lastServerProgressKey) {
-      scheduleProgressSave(250);
+    if (shouldSync) {
+      cacheProgress(bookId, restoredProgress, { dirty: true, baseVersion: progressBaseVersion });
+      scheduleProgressSave(250, { force: true });
     }
   } catch (error) {
     reader.error = error.message;
@@ -264,24 +285,11 @@ function afterNextPaint() {
   });
 }
 
-function newestProgress(serverProgress, cachedProgress) {
-  if (!serverProgress) {
-    return cachedProgress;
-  }
-  if (!cachedProgress) {
-    return serverProgress;
-  }
-
-  const serverTime = Date.parse(serverProgress.updated_at || 0);
-  const cachedTime = Date.parse(cachedProgress.updated_at || 0);
-  return cachedTime > serverTime ? cachedProgress : serverProgress;
-}
-
 function applyCachedProgress(books) {
   const cache = progressCache();
   return books.map((book) => ({
     ...book,
-    progress: newestProgress(book.progress, cache[book.id]),
+    progress: chooseProgressForOpen(book.progress, cache[book.id], book.id).progress,
   }));
 }
 
@@ -335,7 +343,7 @@ function shouldRestoreByPercent(progress) {
     return true;
   }
 
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  const maxScroll = maxScrollTop();
   const targetScroll = window.scrollY + target.getBoundingClientRect().top - 88;
   const offsetPercent = Math.min(1, Math.max(0, targetScroll / maxScroll));
   return Math.abs(offsetPercent - progress.percent) > 0.08;
@@ -343,7 +351,7 @@ function shouldRestoreByPercent(progress) {
 
 function restoreScrollPercent(percent) {
   window.requestAnimationFrame(() => {
-    const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    const maxScroll = maxScrollTop();
     window.scrollTo({ top: maxScroll * Math.min(1, Math.max(0, percent)) });
   });
 }
@@ -374,7 +382,7 @@ function onVisibilityChange() {
 }
 
 function loadCachedProgress(bookId) {
-  return progressCache()[bookId] || null;
+  return normalizeProgress(bookId, progressCache()[bookId]) || null;
 }
 
 function progressCache() {
@@ -385,13 +393,16 @@ function progressCache() {
   }
 }
 
-function cacheProgress(bookId, progress) {
-  const cachedProgress = {
-    book_id: bookId,
-    char_offset: progress.char_offset,
-    percent: progress.percent,
-    updated_at: progress.updated_at || new Date().toISOString(),
-  };
+function cacheProgress(bookId, progress, options = {}) {
+  const cachedProgress = normalizeProgress(bookId, {
+    ...progress,
+    dirty: options.dirty ?? progress.dirty,
+    base_version: options.baseVersion ?? progress.base_version ?? progressBaseVersion,
+  }, {
+    dirty: Boolean(options.dirty),
+    base_version: options.baseVersion ?? progressBaseVersion,
+    updated_at: new Date().toISOString(),
+  });
 
   try {
     const cache = JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}");
@@ -424,13 +435,16 @@ function canSaveReaderProgress() {
   return route.name === "reader" && reader.book && reader.paragraphs.length > 0;
 }
 
-function snapshotProgress() {
+function snapshotProgress(options = {}) {
   if (!canSaveReaderProgress()) {
     return null;
   }
 
   const payload = progressPayload();
-  const progress = cacheProgress(reader.book.book_id, payload);
+  const progress = cacheProgress(reader.book.book_id, payload, {
+    dirty: options.dirty ?? true,
+    baseVersion: progressBaseVersion,
+  });
   reader.progress = progress;
   reader.visiblePercent = progress.percent;
   updateShelfBookProgress(progress);
@@ -443,10 +457,11 @@ function saveProgressInBackground() {
     return;
   }
 
-  if (!saveProgressBeacon(reader.book.book_id, progress)) {
-    void saveProgressKeepalive(reader.book.book_id, progress)
+  const payload = savePayload(progress, progressBaseVersion);
+  if (!saveProgressBeacon(reader.book.book_id, payload)) {
+    void saveProgressKeepalive(reader.book.book_id, payload)
       .then((saved) => {
-        lastServerProgressKey = progressKey(saved);
+        applySavedProgress(saved, progress);
       })
       .catch(() => {});
   }
@@ -460,6 +475,10 @@ async function saveProgressNow(options = {}) {
 
   const key = progressKey(progress);
   if (!options.force && key === lastServerProgressKey) {
+    cacheProgress(reader.book.book_id, progress, {
+      dirty: false,
+      baseVersion: progressBaseVersion,
+    });
     return progress;
   }
   if (saveInFlight) {
@@ -470,12 +489,12 @@ async function saveProgressNow(options = {}) {
   saveInFlight = true;
   reader.saving = true;
   try {
-    const saved = await saveProgress(reader.book.book_id, progress, options);
-    const cached = cacheProgress(reader.book.book_id, saved);
-    reader.progress = cached;
-    lastServerProgressKey = progressKey(cached);
-    updateShelfBookProgress(cached);
-    return cached;
+    const saved = await saveProgress(
+      reader.book.book_id,
+      savePayload(progress, progressBaseVersion),
+      options,
+    );
+    return applySavedProgress(saved, progress);
   } catch (error) {
     if (!options.quiet) {
       reader.error = error.message;
@@ -489,6 +508,29 @@ async function saveProgressNow(options = {}) {
       void saveProgressNow({ quiet: true });
     }
   }
+}
+
+function applySavedProgress(saved, attempted = null) {
+  const normalized = normalizeProgress(reader.book?.book_id, saved, { dirty: false });
+  if (!normalized) {
+    return attempted;
+  }
+
+  progressBaseVersion = normalized.version;
+  lastServerProgressKey = progressKey(normalized);
+  const cached = cacheProgress(normalized.book_id, normalized, {
+    dirty: false,
+    baseVersion: normalized.version,
+  });
+  reader.progress = cached;
+  updateShelfBookProgress(cached);
+
+  if (isRemoteAhead(cached, attempted)) {
+    reader.visiblePercent = cached.percent;
+    restoreScroll(cached);
+  }
+
+  return cached;
 }
 
 function nearestParagraph(charOffset) {
@@ -509,15 +551,19 @@ function onReaderScroll() {
     return;
   }
 
-  updateVisibleProgress();
-  snapshotProgress();
+  if (progressFrame === null) {
+    progressFrame = window.requestAnimationFrame(() => {
+      progressFrame = null;
+      snapshotProgress();
+    });
+  }
   window.clearTimeout(scrollTimer);
   scrollTimer = window.setTimeout(() => scheduleProgressSave(450), 120);
 }
 
-function scheduleProgressSave(delay = 650) {
+function scheduleProgressSave(delay = 650, options = {}) {
   window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => saveProgressNow({ quiet: true }), delay);
+  saveTimer = window.setTimeout(() => saveProgressNow({ quiet: true, ...options }), delay);
 }
 
 function periodicProgressSave() {
@@ -547,19 +593,16 @@ function progressPayload() {
 }
 
 function currentScrollPercent() {
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-  return Math.min(1, Math.max(0, window.scrollY / maxScroll));
+  return Math.min(1, Math.max(0, window.scrollY / maxScrollTop()));
+}
+
+function maxScrollTop() {
+  const scroller = document.scrollingElement || document.documentElement;
+  return Math.max(1, scroller.scrollHeight - window.innerHeight);
 }
 
 function updateVisibleProgress() {
   reader.visiblePercent = currentScrollPercent();
-}
-
-function progressKey(progress) {
-  if (!progress) {
-    return "";
-  }
-  return `${progress.char_offset}:${Math.round((progress.percent || 0) * 10000)}`;
 }
 
 function currentOffset() {
@@ -585,7 +628,7 @@ function offsetForPercent(percent) {
     return 0;
   }
 
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  const maxScroll = maxScrollTop();
   const targetY = maxScroll * Math.min(1, Math.max(0, percent)) + 88;
   let candidate = nodes[0];
 
@@ -603,7 +646,7 @@ function offsetForPercent(percent) {
 
 function seekProgress(event) {
   const value = Number(event.target.value) / 1000;
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  const maxScroll = maxScrollTop();
   reader.pendingSeekPercent = value;
   window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;

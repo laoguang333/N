@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { chooseProgressForOpen, isRemoteAhead, savePayload } from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 describe("reader helpers", () => {
@@ -35,5 +36,54 @@ describe("reader helpers", () => {
     expect(formatPercent(null)).toBe("未读");
     expect(formatPercent({ percent: 0.425 })).toBe("43%");
     expect(formatPercent({ percent: 1 })).toBe("已读");
+  });
+
+  test("chooses server progress unless local cache is unsynced or server is unread", () => {
+    const server = {
+      book_id: 1,
+      char_offset: 100,
+      percent: 0.5,
+      version: 2,
+      updated_at: "2026-04-29T10:00:00.000Z",
+    };
+
+    expect(
+      chooseProgressForOpen(server, { ...server, percent: 0.1, updated_at: "2026-04-29T11:00:00.000Z" }, 1)
+        .progress.percent,
+    ).toBe(0.5);
+
+    expect(
+      chooseProgressForOpen(
+        server,
+        {
+          book_id: 1,
+          char_offset: 130,
+          percent: 0.65,
+          version: 2,
+          base_version: 2,
+          dirty: true,
+          updated_at: "2026-04-29T11:00:00.000Z",
+        },
+        1,
+      ),
+    ).toMatchObject({ progress: { percent: 0.65 }, shouldSync: true });
+
+    expect(
+      chooseProgressForOpen(
+        { ...server, char_offset: 0, percent: 0, version: 1 },
+        { book_id: 1, char_offset: 20, percent: 0.2, updated_at: "2026-04-29T11:00:00.000Z" },
+        1,
+      ),
+    ).toMatchObject({ progress: { percent: 0.2 }, shouldSync: true });
+  });
+
+  test("progress payload carries base version and detects remote-ahead conflicts", () => {
+    expect(savePayload({ char_offset: 20, percent: 0.2 }, 3)).toEqual({
+      char_offset: 20,
+      percent: 0.2,
+      base_version: 3,
+    });
+    expect(isRemoteAhead({ percent: 0.8 }, { percent: 0.2 })).toBe(true);
+    expect(isRemoteAhead({ percent: 0.2 }, { percent: 0.8 })).toBe(false);
   });
 });

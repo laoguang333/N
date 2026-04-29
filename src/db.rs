@@ -52,6 +52,7 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             book_id INTEGER PRIMARY KEY,
             char_offset INTEGER NOT NULL,
             percent REAL NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
         );
@@ -70,6 +71,12 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         )
         .execute(db)
         .await?;
+    }
+
+    if !column_exists(db, "reading_progress", "version").await? {
+        sqlx::query("ALTER TABLE reading_progress ADD COLUMN version INTEGER NOT NULL DEFAULT 1;")
+            .execute(db)
+            .await?;
     }
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_books_rating ON books(rating);")
@@ -96,7 +103,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn migrate_creates_rating_column() {
+    async fn migrate_creates_progress_version_and_rating_columns() {
         let (dir, db_path) = temp_db_path("migrate-rating");
         let db = connect_db(db_path.to_str().unwrap()).await.unwrap();
 
@@ -104,6 +111,11 @@ mod tests {
         migrate(&db).await.unwrap();
 
         assert!(column_exists(&db, "books", "rating").await.unwrap());
+        assert!(
+            column_exists(&db, "reading_progress", "version")
+                .await
+                .unwrap()
+        );
 
         db.close().await;
         let _ = std::fs::remove_dir_all(dir);
