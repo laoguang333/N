@@ -57,7 +57,7 @@ const reader = reactive({
   paragraphs: [],
   progress: null,
   visiblePercent: 0,
-  progressVisible: false,
+  controlsVisible: false,
   progressSeeking: false,
   settingsOpen: false,
 });
@@ -67,7 +67,6 @@ const readerRoot = ref(null);
 let saveTimer = null;
 let scrollTimer = null;
 let shelfTimer = null;
-let progressHideTimer = null;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -110,7 +109,6 @@ onBeforeUnmount(() => {
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
   window.clearTimeout(shelfTimer);
-  window.clearTimeout(progressHideTimer);
 });
 
 watch(
@@ -161,12 +159,15 @@ async function loadBooks() {
   shelf.loading = true;
   shelf.error = "";
   try {
-    shelf.books = await listBooks({
-      search: shelf.search,
-      status: shelf.status,
-      minRating: shelf.minRating,
-      sort: shelf.sort,
-    });
+    const books = applyCachedProgress(
+      await listBooks({
+        search: shelf.search,
+        status: "all",
+        minRating: shelf.minRating,
+        sort: shelf.sort,
+      }),
+    );
+    shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -211,7 +212,7 @@ async function openBook(bookId) {
   reader.paragraphs = [];
   reader.progress = null;
   reader.visiblePercent = 0;
-  reader.progressVisible = false;
+  reader.controlsVisible = false;
   reader.progressSeeking = false;
   window.scrollTo({ top: 0 });
 
@@ -225,17 +226,23 @@ async function openBook(bookId) {
     reader.progress = restoredProgress;
     reader.visiblePercent = restoredProgress?.percent || 0;
     reader.paragraphs = buildParagraphs(content.content);
-    reader.loading = false;
     await nextTick();
     restoreScroll(restoredProgress);
-    window.requestAnimationFrame(() => {
-      updateVisibleProgress();
-      hideReaderProgress();
-    });
+    await afterNextPaint();
+    updateVisibleProgress();
+    reader.loading = false;
   } catch (error) {
     reader.error = error.message;
     reader.loading = false;
   }
+}
+
+function afterNextPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
 }
 
 function newestProgress(serverProgress, cachedProgress) {
@@ -249,6 +256,32 @@ function newestProgress(serverProgress, cachedProgress) {
   const serverTime = Date.parse(serverProgress.updated_at || 0);
   const cachedTime = Date.parse(cachedProgress.updated_at || 0);
   return cachedTime > serverTime ? cachedProgress : serverProgress;
+}
+
+function applyCachedProgress(books) {
+  const cache = progressCache();
+  return books.map((book) => ({
+    ...book,
+    progress: newestProgress(book.progress, cache[book.id]),
+  }));
+}
+
+function matchesShelfStatus(book, status) {
+  if (!status || status === "all") {
+    return true;
+  }
+
+  const percent = book.progress?.percent || 0;
+  if (status === "unread") {
+    return percent <= 0;
+  }
+  if (status === "reading") {
+    return percent > 0 && percent < 1;
+  }
+  if (status === "finished") {
+    return percent >= 1;
+  }
+  return true;
 }
 
 function restoreScroll(progress) {
@@ -282,21 +315,11 @@ function restoreShelfScroll() {
   }
 }
 
-function hideReaderProgress() {
-  window.clearTimeout(progressHideTimer);
-  reader.progressVisible = false;
-}
-
-function showReaderProgress(duration = 1500) {
-  reader.progressVisible = true;
-  window.clearTimeout(progressHideTimer);
-  if (duration !== null) {
-    progressHideTimer = window.setTimeout(() => {
-      if (!reader.progressSeeking) {
-        reader.progressVisible = false;
-      }
-    }, duration);
+function toggleReaderControls() {
+  if (!reader.book || reader.loading || reader.settingsOpen) {
+    return;
   }
+  reader.controlsVisible = !reader.controlsVisible;
 }
 
 function onVisibilityChange() {
@@ -306,10 +329,14 @@ function onVisibilityChange() {
 }
 
 function loadCachedProgress(bookId) {
+  return progressCache()[bookId] || null;
+}
+
+function progressCache() {
   try {
-    return JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}")[bookId] || null;
+    return JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}");
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -418,7 +445,6 @@ function onReaderScroll() {
   }
 
   updateVisibleProgress();
-  showReaderProgress();
   window.clearTimeout(scrollTimer);
   scrollTimer = window.setTimeout(scheduleProgressSave, 160);
 }
@@ -466,18 +492,16 @@ function seekProgress(event) {
   const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
   window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;
-  showReaderProgress(1800);
   scheduleProgressSave();
 }
 
 function startSeek() {
   reader.progressSeeking = true;
-  showReaderProgress(null);
+  reader.controlsVisible = true;
 }
 
 function endSeek() {
   reader.progressSeeking = false;
-  showReaderProgress(900);
 }
 
 function flushProgress() {
@@ -615,7 +639,7 @@ async function updateRating(book, rating) {
     </section>
 
     <section v-else class="reader-view" @scroll.passive="onReaderScroll">
-      <header class="reader-toolbar">
+      <header class="reader-toolbar" :class="{ 'is-visible': reader.controlsVisible || reader.settingsOpen }">
         <button class="icon-button" type="button" @click="goShelf" title="返回书架">
           <ArrowLeft :size="22" />
         </button>
@@ -634,14 +658,16 @@ async function updateRating(book, rating) {
       </div>
 
       <article
-        v-else
+        v-if="reader.book"
         ref="readerRoot"
         class="reader-content"
+        :class="{ 'is-restoring': reader.loading }"
         :style="{
           '--reader-font-size': `${settings.fontSize}px`,
           '--reader-line-height': settings.lineHeight,
           '--reader-paragraph-spacing': `${settings.paragraphSpacing}px`,
         }"
+        @click="toggleReaderControls"
         @scroll.passive="onReaderScroll"
       >
         <p v-for="paragraph in reader.paragraphs" :key="paragraph.offset" :data-offset="paragraph.offset">
@@ -652,7 +678,7 @@ async function updateRating(book, rating) {
       <div
         v-if="reader.book && !reader.loading"
         class="reader-progress"
-        :class="{ 'is-visible': reader.progressVisible || reader.progressSeeking }"
+        :class="{ 'is-visible': reader.controlsVisible || reader.progressSeeking }"
       >
         <input
           type="range"

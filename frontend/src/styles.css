@@ -277,14 +277,28 @@ h1 {
 }
 
 .reader-toolbar {
-  position: sticky;
+  position: fixed;
   top: 0;
+  right: 0;
+  left: 0;
   z-index: 10;
   min-height: 58px;
   padding: max(8px, env(safe-area-inset-top)) 12px 8px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-110%);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.reader-toolbar.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .reader-title {
@@ -314,15 +328,23 @@ h1 {
 }
 
 .reader-loading {
-  min-height: calc(100vh - 70px);
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  min-height: 100vh;
+  background: var(--bg);
 }
 
 .reader-content {
   width: min(760px, 100%);
   margin: 0 auto;
-  padding: 24px 20px calc(44vh + 44px);
+  padding: max(24px, env(safe-area-inset-top)) 20px calc(44vh + 44px);
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
+}
+
+.reader-content.is-restoring {
+  visibility: hidden;
 }
 
 .reader-content p {
