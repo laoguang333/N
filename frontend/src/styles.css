@@ -347,6 +347,18 @@ h1 {
   color: var(--muted);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(110%);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.reader-progress.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .reader-progress input {

@@ -26,7 +26,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/books/{id}/content", get(get_book_content))
         .route(
             "/api/books/{id}/progress",
-            get(get_progress).put(save_progress),
+            get(get_progress).put(save_progress).post(save_progress),
         )
         .route("/api/books/{id}/rating", put(save_rating))
         .route("/api/library/scan", post(scan))

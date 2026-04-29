@@ -73,6 +73,17 @@ export function saveProgress(id, progress, options = {}) {
   });
 }
 
+export function saveProgressBeacon(id, progress) {
+  if (!navigator.sendBeacon) {
+    return false;
+  }
+
+  const body = new Blob([JSON.stringify(progress)], {
+    type: "application/json",
+  });
+  return navigator.sendBeacon(`/api/books/${id}/progress`, body);
+}
+
 export function saveRating(id, rating) {
   return request(`/api/books/${id}/rating`, {
     method: "PUT",

@@ -20,12 +20,14 @@ import {
   getPublicConfig,
   listBooks,
   saveProgress,
+  saveProgressBeacon,
   saveRating,
   scanLibrary,
 } from "./api";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 const STORAGE_KEY = "txt-reader-settings";
+const PROGRESS_CACHE_KEY = "txt-reader-progress";
 
 const route = reactive({
   name: "shelf",
@@ -38,6 +40,7 @@ const shelf = reactive({
   status: "all",
   minRating: "",
   sort: "recent",
+  scrollTop: 0,
   config: null,
   loading: false,
   scanning: false,
@@ -54,6 +57,8 @@ const reader = reactive({
   paragraphs: [],
   progress: null,
   visiblePercent: 0,
+  progressVisible: false,
+  progressSeeking: false,
   settingsOpen: false,
 });
 
@@ -62,6 +67,7 @@ const readerRoot = ref(null);
 let saveTimer = null;
 let scrollTimer = null;
 let shelfTimer = null;
+let progressHideTimer = null;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -89,6 +95,8 @@ onMounted(() => {
   window.addEventListener("hashchange", parseHash);
   window.addEventListener("scroll", onReaderScroll, { passive: true });
   window.addEventListener("beforeunload", flushProgress);
+  window.addEventListener("pagehide", flushProgress);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   loadConfig();
   loadBooks();
 });
@@ -97,9 +105,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("hashchange", parseHash);
   window.removeEventListener("scroll", onReaderScroll);
   window.removeEventListener("beforeunload", flushProgress);
+  window.removeEventListener("pagehide", flushProgress);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
   window.clearTimeout(shelfTimer);
+  window.clearTimeout(progressHideTimer);
 });
 
 watch(
@@ -118,12 +129,23 @@ function loadSettings() {
 function parseHash() {
   const match = window.location.hash.match(/^#\/reader\/(\d+)/);
   if (match) {
+    const nextBookId = Number(match[1]);
+    if (route.name === "reader" && route.bookId && route.bookId !== nextBookId) {
+      saveProgressInBackground();
+    }
     route.name = "reader";
-    route.bookId = Number(match[1]);
+    route.bookId = nextBookId;
   } else {
+    const shouldRestoreShelf = route.name === "reader";
+    if (shouldRestoreShelf) {
+      saveProgressInBackground();
+    }
     route.name = "shelf";
     route.bookId = null;
     reader.settingsOpen = false;
+    if (shouldRestoreShelf) {
+      nextTick(restoreShelfScroll);
+    }
   }
 }
 
@@ -189,6 +211,8 @@ async function openBook(bookId) {
   reader.paragraphs = [];
   reader.progress = null;
   reader.visiblePercent = 0;
+  reader.progressVisible = false;
+  reader.progressSeeking = false;
   window.scrollTo({ top: 0 });
 
   try {
@@ -196,25 +220,182 @@ async function openBook(bookId) {
       getBookContent(bookId),
       getProgress(bookId),
     ]);
+    const restoredProgress = newestProgress(progress, loadCachedProgress(bookId));
     reader.book = content;
-    reader.progress = progress;
-    reader.visiblePercent = progress?.percent || 0;
+    reader.progress = restoredProgress;
+    reader.visiblePercent = restoredProgress?.percent || 0;
     reader.paragraphs = buildParagraphs(content.content);
+    reader.loading = false;
     await nextTick();
-    restoreScroll(progress?.char_offset || 0);
-    window.requestAnimationFrame(updateVisibleProgress);
+    restoreScroll(restoredProgress);
+    window.requestAnimationFrame(() => {
+      updateVisibleProgress();
+      hideReaderProgress();
+    });
   } catch (error) {
     reader.error = error.message;
-  } finally {
     reader.loading = false;
   }
 }
 
-function restoreScroll(charOffset) {
-  const target = readerRoot.value?.querySelector(`[data-offset="${charOffset}"]`)
-    || nearestParagraph(charOffset);
+function newestProgress(serverProgress, cachedProgress) {
+  if (!serverProgress) {
+    return cachedProgress;
+  }
+  if (!cachedProgress) {
+    return serverProgress;
+  }
+
+  const serverTime = Date.parse(serverProgress.updated_at || 0);
+  const cachedTime = Date.parse(cachedProgress.updated_at || 0);
+  return cachedTime > serverTime ? cachedProgress : serverProgress;
+}
+
+function restoreScroll(progress) {
+  if (!progress) {
+    return;
+  }
+
+  const target = readerRoot.value?.querySelector(`[data-offset="${progress.char_offset}"]`)
+    || nearestParagraph(progress.char_offset);
+
   if (target) {
     target.scrollIntoView({ block: "start" });
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo({ top: maxScroll * (progress.percent || 0) });
+  });
+}
+
+function restoreShelfScroll() {
+  if (route.name === "shelf") {
+    const top = shelf.scrollTop || 0;
+    window.scrollTo({ top });
+    window.requestAnimationFrame(() => {
+      if (route.name === "shelf") {
+        window.scrollTo({ top });
+      }
+    });
+  }
+}
+
+function hideReaderProgress() {
+  window.clearTimeout(progressHideTimer);
+  reader.progressVisible = false;
+}
+
+function showReaderProgress(duration = 1500) {
+  reader.progressVisible = true;
+  window.clearTimeout(progressHideTimer);
+  if (duration !== null) {
+    progressHideTimer = window.setTimeout(() => {
+      if (!reader.progressSeeking) {
+        reader.progressVisible = false;
+      }
+    }, duration);
+  }
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    flushProgress();
+  }
+}
+
+function loadCachedProgress(bookId) {
+  try {
+    return JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}")[bookId] || null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheProgress(bookId, progress) {
+  const cachedProgress = {
+    book_id: bookId,
+    char_offset: progress.char_offset,
+    percent: progress.percent,
+    updated_at: progress.updated_at || new Date().toISOString(),
+  };
+
+  try {
+    const cache = JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}");
+    cache[bookId] = cachedProgress;
+    localStorage.setItem(PROGRESS_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    localStorage.setItem(PROGRESS_CACHE_KEY, JSON.stringify({ [bookId]: cachedProgress }));
+  }
+
+  return cachedProgress;
+}
+
+function updateShelfBookProgress(progress) {
+  const index = shelf.books.findIndex((book) => book.id === progress.book_id);
+  if (index !== -1) {
+    shelf.books[index] = {
+      ...shelf.books[index],
+      progress,
+    };
+  }
+}
+
+function markShelfScroll() {
+  if (route.name === "shelf") {
+    shelf.scrollTop = window.scrollY;
+  }
+}
+
+function canSaveReaderProgress() {
+  return route.name === "reader" && reader.book && reader.paragraphs.length > 0;
+}
+
+function snapshotProgress() {
+  if (!canSaveReaderProgress()) {
+    return null;
+  }
+
+  const payload = progressPayload();
+  const progress = cacheProgress(reader.book.book_id, payload);
+  reader.progress = progress;
+  reader.visiblePercent = progress.percent;
+  updateShelfBookProgress(progress);
+  return progress;
+}
+
+function saveProgressInBackground() {
+  const progress = snapshotProgress();
+  if (!progress || !reader.book) {
+    return;
+  }
+
+  if (!saveProgressBeacon(reader.book.book_id, progress)) {
+    void saveProgress(reader.book.book_id, progress, { keepalive: true }).catch(() => {});
+  }
+}
+
+async function saveProgressNow(options = {}) {
+  const progress = snapshotProgress();
+  if (!progress || !reader.book) {
+    return null;
+  }
+
+  reader.saving = true;
+  try {
+    const saved = await saveProgress(reader.book.book_id, progress, options);
+    const cached = cacheProgress(reader.book.book_id, saved);
+    reader.progress = cached;
+    updateShelfBookProgress(cached);
+    return cached;
+  } catch (error) {
+    if (!options.quiet) {
+      reader.error = error.message;
+    }
+    return progress;
+  } finally {
+    reader.saving = false;
   }
 }
 
@@ -237,13 +418,14 @@ function onReaderScroll() {
   }
 
   updateVisibleProgress();
+  showReaderProgress();
   window.clearTimeout(scrollTimer);
   scrollTimer = window.setTimeout(scheduleProgressSave, 160);
 }
 
 function scheduleProgressSave() {
   window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => persistProgress(), 1200);
+  saveTimer = window.setTimeout(() => saveProgressNow({ quiet: true }), 900);
 }
 
 function progressPayload() {
@@ -279,48 +461,40 @@ function currentOffset() {
   return Number(candidate?.dataset.offset || 0);
 }
 
-async function persistProgress(options = {}) {
-  if (!reader.book) {
-    return;
-  }
-
-  reader.saving = true;
-
-  try {
-    const payload = progressPayload();
-    reader.visiblePercent = payload.percent;
-    reader.progress = await saveProgress(reader.book.book_id, payload, options);
-  } catch (error) {
-    if (!options.keepalive) {
-      reader.error = error.message;
-    }
-  } finally {
-    reader.saving = false;
-  }
-}
-
 function seekProgress(event) {
   const value = Number(event.target.value) / 1000;
   const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
   window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;
+  showReaderProgress(1800);
   scheduleProgressSave();
 }
 
+function startSeek() {
+  reader.progressSeeking = true;
+  showReaderProgress(null);
+}
+
+function endSeek() {
+  reader.progressSeeking = false;
+  showReaderProgress(900);
+}
+
 function flushProgress() {
-  if (route.name === "reader" && reader.book) {
+  if (canSaveReaderProgress()) {
     window.clearTimeout(saveTimer);
-    void persistProgress({ keepalive: true });
+    saveProgressInBackground();
   }
 }
 
-function goShelf() {
-  flushProgress();
+async function goShelf() {
+  window.clearTimeout(saveTimer);
+  await saveProgressNow({ quiet: true });
   window.location.hash = "#/";
-  loadBooks();
 }
 
 function openReader(bookId) {
+  markShelfScroll();
   window.location.hash = `#/reader/${bookId}`;
 }
 
@@ -475,7 +649,11 @@ async function updateRating(book, rating) {
         </p>
       </article>
 
-      <div v-if="reader.book && !reader.loading" class="reader-progress">
+      <div
+        v-if="reader.book && !reader.loading"
+        class="reader-progress"
+        :class="{ 'is-visible': reader.progressVisible || reader.progressSeeking }"
+      >
         <input
           type="range"
           min="0"
@@ -483,6 +661,10 @@ async function updateRating(book, rating) {
           step="1"
           :value="readerProgressValue"
           :aria-label="`阅读进度 ${readerProgressLabel}`"
+          @pointerdown="startSeek"
+          @pointerup="endSeek"
+          @touchstart.passive="startSeek"
+          @touchend.passive="endSeek"
           @input="seekProgress"
         />
         <span>{{ readerProgressLabel }}</span>
