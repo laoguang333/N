@@ -23,6 +23,8 @@ def main() -> int:
         ("rust tests", [cargo, "test"], ROOT),
         ("frontend deps", [npm, "ci"], FRONTEND),
         ("frontend tests", [npm, "test"], FRONTEND),
+        ("playwright browser", [require("npx"), "playwright", "install", "chromium"], FRONTEND),
+        ("frontend e2e", [npm, "run", "test:e2e"], FRONTEND),
         ("frontend build", [npm, "run", "build"], FRONTEND),
     ]
 
