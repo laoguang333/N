@@ -19,7 +19,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen: "0.0.0.0:3000".to_string(),
+            listen: "0.0.0.0:234".to_string(),
             database_path: "data/reader.sqlite".to_string(),
             library_dirs: vec!["novels".to_string()],
             scan_recursive: false,
@@ -60,7 +60,7 @@ mod tests {
         let path = temp_file("missing-config.toml");
         let config = Config::load(&path).unwrap();
 
-        assert_eq!(config.listen, "0.0.0.0:3000");
+        assert_eq!(config.listen, "0.0.0.0:234");
         assert_eq!(config.database_path, "data/reader.sqlite");
         assert_eq!(config.library_dirs, vec!["novels"]);
         assert!(!config.scan_recursive);

@@ -43,6 +43,54 @@ npm ci
 npm run dev
 ```
 
+## 常用命令
+
+以下命令默认在项目根目录 `C:\Users\nillouise\Music\rust\N` 执行。
+
+只构建前端静态文件：
+
+```powershell
+python scripts/codex.py build-frontend
+```
+
+只构建后端可执行文件：
+
+```powershell
+python scripts/codex.py build-backend
+```
+
+生产模式构建并启动后端，后端会直接托管 `frontend/dist`：
+
+```powershell
+python scripts/codex.py build-all
+python scripts/codex.py start-backend
+```
+
+使用已编译的后端可执行文件启动：
+
+```powershell
+cargo build
+.\target\debug\txt-reader.exe
+```
+
+开发模式同时启动后端和 Vite 前端：
+
+```powershell
+python scripts/codex.py dev
+```
+
+检查端口是否被占用：
+
+```powershell
+python scripts/codex.py port
+```
+
+运行完整检查：
+
+```powershell
+python scripts/codex.py check
+```
+
 ## 生产构建
 
 ```powershell
@@ -60,23 +108,23 @@ cargo run
 默认监听地址是：
 
 ```text
-0.0.0.0:3000
+0.0.0.0:234
 ```
 
 在手机或 iPad 上访问：
 
 ```text
-http://电脑局域网IP:3000
+http://电脑局域网IP:234
 ```
 
-如果无法访问，检查 Windows 防火墙是否允许当前 Rust 程序或 3000 端口入站连接。
+如果无法访问，检查 Windows 防火墙是否允许当前 Rust 程序或 234 端口入站连接。`234` 不是常见 Web 服务端口；在 Windows 上普通用户通常可以监听，Linux/macOS 上低于 1024 的端口可能需要管理员权限或额外授权。
 
 ## 局域网 HTTPS
 
 PWA 的 Service Worker 需要可信 HTTPS。固定设备内网使用时，可以用项目脚本生成一个本地 CA 和局域网服务证书：
 
 ```powershell
-pwsh -ExecutionPolicy Bypass -File scripts/setup-local-https.ps1
+python scripts/codex.py setup-https
 ```
 
 脚本会：
@@ -95,7 +143,7 @@ tls_key_path = "certs/server-key.pem"
 重新启动后端后，用手机或 iPad 访问：
 
 ```text
-https://电脑局域网IP:3000
+https://电脑局域网IP:234
 ```
 
 其他设备也需要信任同一个 CA。把 `certs/local-ca.cer` 或 `certs/local-ca.pem` 传到手机上安装：
@@ -103,7 +151,7 @@ https://电脑局域网IP:3000
 - iOS / iPadOS：安装描述文件后，到“设置 -> 通用 -> 关于本机 -> 证书信任设置”中开启完全信任。
 - Android：在系统安全设置中安装 CA 证书。不同浏览器对用户 CA 的支持略有差异，Chrome 通常可以使用系统已安装的用户 CA。
 
-如果电脑的局域网 IP 变了，重新运行脚本并重启后端。
+证书已经生成后，日常构建和启动不需要再运行这个命令。只有电脑的局域网 IP 变了，或证书过期时，才需要重新生成并重启后端。
 
 ## 手机或 iPad 全屏阅读
 
@@ -114,7 +162,7 @@ Android 上也可以通过浏览器菜单里的“添加到主屏幕”或“安
 ## 配置
 
 ```toml
-listen = "0.0.0.0:3000"
+listen = "0.0.0.0:234"
 database_path = "data/reader.sqlite"
 library_dirs = ["novels"]
 scan_recursive = false
@@ -147,7 +195,7 @@ python scripts/check.py
 ## 常见问题
 
 - 书架为空：确认 TXT 文件放在 `library_dirs` 指定目录；默认非递归扫描，子目录文件需要开启 `scan_recursive`。
-- 前端开发服务器无法请求 API：确认后端正在 3000 端口运行，Vite 会把 `/api` 代理到 `http://127.0.0.1:3000`。
+- 前端开发服务器无法请求 API：确认后端正在 234 端口运行，Vite 会把 `/api` 代理到 `http://127.0.0.1:234`。
 - `cargo` 无法下载依赖：检查网络、代理和系统证书；依赖缓存完整后可再次运行 `python scripts/check.py`。
 - 修改配置后无效：重启后端服务。
 
