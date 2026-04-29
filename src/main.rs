@@ -4,8 +4,16 @@ mod config;
 mod db;
 mod library;
 mod models;
+#[cfg(target_os = "windows")]
+mod tray;
 
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, mpsc},
+};
 
 use anyhow::Context;
 use api::router;
@@ -32,8 +40,7 @@ pub struct AppState {
     pub db: sqlx::SqlitePool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -42,7 +49,40 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     let config = Config::load("config.toml")?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let RunningServer {
+            shutdown,
+            failure_rx,
+        } = runtime.block_on(start_server(config))?;
+        let tray_result = tray::run(failure_rx);
+        let _ = shutdown.send(());
+        tray_result
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        runtime.block_on(async {
+            let RunningServer {
+                shutdown: _shutdown,
+                failure_rx,
+            } = start_server(config).await?;
+            wait_for_server_failure(failure_rx).await
+        })
+    }
+}
+
+struct RunningServer {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    failure_rx: mpsc::Receiver<String>,
+}
+
+async fn start_server(config: Config) -> anyhow::Result<RunningServer> {
     let db = connect_db(&config.database_path).await?;
     migrate(&db).await?;
 
@@ -99,30 +139,65 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .parse()
         .with_context(|| format!("invalid listen address: {}", config.listen))?;
-    match (&config.tls_cert_path, &config.tls_key_path) {
-        (Some(cert_path), Some(key_path)) => {
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .with_context(|| {
-                    format!("failed to load TLS certificate {cert_path} and key {key_path}")
-                })?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (failure_tx, failure_rx) = mpsc::channel();
+    let server: Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>> =
+        match (&config.tls_cert_path, &config.tls_key_path) {
+            (Some(cert_path), Some(key_path)) => {
+                let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+                let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+                    .await
+                    .with_context(|| {
+                        format!("failed to load TLS certificate {cert_path} and key {key_path}")
+                    })?;
 
-            tracing::info!("listening on https://{addr}");
-            axum_server::bind_rustls(addr, tls_config)
-                .serve(app.into_make_service())
-                .await?;
+                tracing::info!("listening on https://{addr}");
+                Box::pin(
+                    axum_server::bind_rustls(addr, tls_config)
+                        .serve(app.into_make_service())
+                        .into_future(),
+                )
+            }
+            (None, None) => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+
+                tracing::info!("listening on http://{addr}");
+                Box::pin(axum::serve(listener, app).into_future())
+            }
+            _ => anyhow::bail!("tls_cert_path and tls_key_path must be configured together"),
+        };
+
+    tokio::spawn(async move {
+        tokio::select! {
+            result = server => {
+                let message = match result {
+                    Ok(()) => "server exited unexpectedly".to_string(),
+                    Err(error) => {
+                        tracing::error!(%error, "server exited unexpectedly");
+                        format!("server exited unexpectedly: {error}")
+                    }
+                };
+                let _ = failure_tx.send(message);
+            }
+            _ = shutdown_rx => {
+                tracing::info!("shutdown signal received");
+            }
         }
-        (None, None) => {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+    });
 
-            tracing::info!("listening on http://{addr}");
-            axum::serve(listener, app).await?;
-        }
-        _ => anyhow::bail!("tls_cert_path and tls_key_path must be configured together"),
-    }
+    Ok(RunningServer {
+        shutdown: shutdown_tx,
+        failure_rx,
+    })
+}
 
-    Ok(())
+#[cfg(not(target_os = "windows"))]
+async fn wait_for_server_failure(failure_rx: mpsc::Receiver<String>) -> anyhow::Result<()> {
+    let message = tokio::task::spawn_blocking(move || failure_rx.recv())
+        .await
+        .context("server failure monitor panicked")?
+        .context("server failure monitor stopped")?;
+    anyhow::bail!(message)
 }
 
 async fn add_security_headers(request: Request, next: Next) -> Response {

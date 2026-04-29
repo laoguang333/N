@@ -23,7 +23,7 @@ def main() -> int:
         run([npm, "ci"], FRONTEND)
 
     processes = [
-        subprocess.Popen([cargo, "run"], cwd=ROOT),
+        subprocess.Popen(cargo_run_command(cargo), cwd=ROOT),
         subprocess.Popen([npm, "run", "dev"], cwd=FRONTEND),
     ]
 
@@ -68,6 +68,10 @@ def frontend_dependencies_ready() -> bool:
         FRONTEND / "node_modules" / "vue" / "dist",
     ]
     return all(path.exists() for path in required_paths)
+
+
+def cargo_run_command(cargo: str) -> list[str]:
+    return [cargo, "run", "--manifest-path", str(ROOT / "Cargo.toml")]
 
 
 def run(command: list[str], cwd: Path) -> None:

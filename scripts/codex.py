@@ -43,7 +43,8 @@ def main() -> int:
         case "install-frontend":
             install_frontend()
         case "start-backend":
-            run([require("cargo"), "run"], ROOT)
+            kill_port_listener(234)
+            run(cargo_run_command(), ROOT)
         case "dev":
             run([sys.executable, str(ROOT / "scripts" / "dev.py")], ROOT)
         case "check":
@@ -85,6 +86,10 @@ def frontend_dependencies_ready() -> bool:
 
 def build_backend() -> None:
     run([require("cargo"), "build"], ROOT)
+
+
+def cargo_run_command() -> list[str]:
+    return [require("cargo"), "run", "--manifest-path", str(ROOT / "Cargo.toml")]
 
 
 def setup_https() -> None:
@@ -229,6 +234,24 @@ def check_port() -> None:
         run(["netstat", "-ano"], ROOT)
     else:
         run(["sh", "-c", "lsof -nP -iTCP:234 -sTCP:LISTEN || true"], ROOT)
+
+
+def kill_port_listener(port: int) -> None:
+    if sys.platform != "win32":
+        return
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            f"$pids = @(Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -ExpandProperty OwningProcess -Unique); if ($pids.Count -gt 0) {{ Stop-Process -Id $pids -Force }}",
+        ],
+        cwd=ROOT,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise SystemExit(result.returncode)
 
 
 def local_ipv4_addresses() -> list[str]:
