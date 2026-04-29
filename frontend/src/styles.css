@@ -434,7 +434,8 @@ h1 {
   top: 74px;
   right: 18px;
   z-index: 19;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   width: min(360px, calc(100vw - 36px));
   max-height: calc(100vh - 116px);
@@ -443,6 +444,7 @@ h1 {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 14px 36px rgb(0 0 0 / 16%);
+  overflow: hidden;
 }
 
 .search-panel-header {
@@ -485,7 +487,11 @@ h1 {
 .search-result-list {
   display: grid;
   gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
   overflow: auto;
+  padding-bottom: 2px;
   padding-right: 2px;
 }
 
@@ -601,6 +607,7 @@ h1 {
   .search-panel {
     top: 82px;
     right: 22px;
+    max-height: calc(100vh - 130px);
   }
 }
 
@@ -633,8 +640,9 @@ h1 {
     bottom: 0;
     left: 0;
     width: auto;
-    max-height: 68vh;
+    max-height: 72vh;
     border-bottom: 0;
     border-radius: 8px 8px 0 0;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

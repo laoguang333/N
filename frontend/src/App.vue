@@ -82,6 +82,7 @@ const reader = reactive({
 
 const settings = reactive(loadSettings());
 const readerRoot = ref(null);
+const searchResultsRoot = ref(null);
 let saveTimer = null;
 let scrollTimer = null;
 let shelfTimer = null;
@@ -690,6 +691,7 @@ function updateSearchResults() {
   if (!reader.searchResults.some((item) => item.id === reader.activeSearchId)) {
     reader.activeSearchId = reader.searchResults[0]?.id || "";
   }
+  queueSearchResultReveal();
 }
 
 watch(
@@ -703,6 +705,7 @@ function selectSearchResult(result) {
   reader.activeSearchId = result.id;
   reader.controlsVisible = true;
   scrollToSearchResult(result);
+  queueSearchResultReveal(result.id);
 }
 
 function scrollToSearchResult(result) {
@@ -718,6 +721,23 @@ function scrollToSearchResult(result) {
       updateVisibleProgress();
     });
   }
+}
+
+function queueSearchResultReveal(targetId = reader.activeSearchId) {
+  if (!targetId) {
+    return;
+  }
+
+  nextTick(() => {
+    window.requestAnimationFrame(() => {
+      const panel = searchResultsRoot.value;
+      const safeId = String(targetId).replaceAll('"', '\\"');
+      const activeButton = panel?.querySelector?.(`[data-result-id="${safeId}"]`);
+      if (activeButton?.scrollIntoView) {
+        activeButton.scrollIntoView({ block: "nearest" });
+      }
+    });
+  });
 }
 
 function paragraphMatches(offset) {
@@ -1035,8 +1055,8 @@ async function updateRating(book, rating) {
 
       <aside v-if="reader.searchOpen" class="search-panel">
         <div class="search-panel-header">
-          <strong>????</strong>
-          <button class="icon-button" type="button" @click="closeSearchPanel" title="??">
+          <strong>Search</strong>
+          <button class="icon-button" type="button" @click="closeSearchPanel" title="Close search panel">
             <X :size="20" />
           </button>
         </div>
@@ -1046,18 +1066,19 @@ async function updateRating(book, rating) {
           <input
             v-model="reader.searchQuery"
             type="search"
-            placeholder="??????????????"
+            placeholder="Search within the book"
           />
         </label>
 
         <p v-if="reader.searchQuery && reader.searchResults.length === 0" class="search-empty">
-          ????????
+          No matches found
         </p>
 
-        <div v-else class="search-result-list">
+        <div v-else ref="searchResultsRoot" class="search-result-list">
           <button
             v-for="result in reader.searchResults"
             :key="result.id"
+            :data-result-id="result.id"
             class="search-result"
             type="button"
             :class="{ active: result.id === reader.activeSearchId }"
