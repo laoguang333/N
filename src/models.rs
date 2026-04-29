@@ -29,7 +29,6 @@ pub struct ReadingProgress {
     pub book_id: i64,
     pub char_offset: i64,
     pub percent: f64,
-    pub version: i64,
     pub updated_at: String,
 }
 
@@ -37,7 +36,6 @@ pub struct ReadingProgress {
 pub struct SaveProgressRequest {
     pub char_offset: i64,
     pub percent: f64,
-    pub base_version: Option<i64>,
     pub source: Option<String>,
     pub client_id: Option<String>,
     pub session_id: Option<String>,

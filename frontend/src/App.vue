@@ -27,11 +27,8 @@ import {
 } from "./api";
 import {
   PROGRESS_CACHE_KEY,
-  chooseProgressForOpen,
-  isRemoteAhead,
   isSuspiciousLocalReset,
   normalizeProgress,
-  progressKey,
   savePayload,
 } from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
@@ -89,9 +86,6 @@ let shelfTimer = null;
 let periodicSaveTimer = null;
 let progressFrame = null;
 let saveInFlight = false;
-let queuedServerSave = false;
-let lastServerProgressKey = "";
-let progressBaseVersion = null;
 let restoreSavingBlocked = false;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
@@ -282,8 +276,6 @@ async function openBook(bookId) {
   reader.searchQuery = "";
   reader.searchResults = [];
   reader.activeSearchId = "";
-  progressBaseVersion = null;
-  lastServerProgressKey = "";
   restoreSavingBlocked = true;
   window.scrollTo({ top: 0 });
 
@@ -293,13 +285,7 @@ async function openBook(bookId) {
       getProgress(bookId),
     ]);
     const serverProgress = normalizeProgress(bookId, progress, { dirty: false });
-    const { progress: restoredProgress, shouldSync } = chooseProgressForOpen(
-      serverProgress,
-      loadCachedProgress(bookId),
-      bookId,
-    );
-    progressBaseVersion = serverProgress?.version ?? null;
-    lastServerProgressKey = progressKey(serverProgress);
+    const restoredProgress = serverProgress || loadCachedProgress(bookId);
     reader.book = content;
     reader.progress = restoredProgress;
     reader.visiblePercent = restoredProgress?.percent || 0;
@@ -315,10 +301,7 @@ async function openBook(bookId) {
     window.setTimeout(() => {
       restoreSavingBlocked = false;
     }, 250);
-    if (shouldSync) {
-      cacheProgress(bookId, restoredProgress, { dirty: true, baseVersion: progressBaseVersion });
-      scheduleProgressSave(250, { force: true, source: "open_sync" });
-    } else if (!serverProgress) {
+    if (!serverProgress) {
       scheduleProgressSave(300, { force: true, source: "open_mark" });
     }
   } catch (error) {
@@ -340,7 +323,7 @@ function applyCachedProgress(books) {
   const cache = progressCache();
   return books.map((book) => ({
     ...book,
-    progress: chooseProgressForOpen(book.progress, cache[book.id], book.id).progress,
+    progress: normalizeProgress(book.id, cache[book.id]) || normalizeProgress(book.id, book.progress),
   }));
 }
 
@@ -463,10 +446,8 @@ function cacheProgress(bookId, progress, options = {}) {
   const cachedProgress = normalizeProgress(bookId, {
     ...progress,
     dirty: options.dirty ?? progress.dirty,
-    base_version: options.baseVersion ?? progress.base_version ?? progressBaseVersion,
   }, {
     dirty: Boolean(options.dirty),
-    base_version: options.baseVersion ?? progressBaseVersion,
     updated_at: new Date().toISOString(),
   });
 
@@ -517,7 +498,6 @@ function snapshotProgress(options = {}) {
 
   const progress = cacheProgress(reader.book.book_id, payload, {
     dirty: options.dirty ?? true,
-    baseVersion: progressBaseVersion,
   });
   reader.progress = progress;
   reader.visiblePercent = progress.percent;
@@ -531,11 +511,11 @@ function saveProgressInBackground(source = "background", options = {}) {
     return;
   }
 
-  const payload = savePayload(progress, progressBaseVersion, progressMeta(source));
+  const payload = savePayload(progress, progressMeta(source));
   if (!saveProgressBeacon(reader.book.book_id, payload)) {
     void saveProgressKeepalive(reader.book.book_id, payload)
       .then((saved) => {
-        applySavedProgress(saved, progress);
+        applySavedProgress(saved);
       })
       .catch(() => {});
   }
@@ -548,16 +528,7 @@ async function saveProgressNow(options = {}) {
     return null;
   }
 
-  const key = progressKey(progress);
-  if (!options.force && key === lastServerProgressKey) {
-    cacheProgress(reader.book.book_id, progress, {
-      dirty: false,
-      baseVersion: progressBaseVersion,
-    });
-    return progress;
-  }
   if (saveInFlight) {
-    queuedServerSave = true;
     return progress;
   }
 
@@ -566,10 +537,10 @@ async function saveProgressNow(options = {}) {
   try {
     const saved = await saveProgress(
       reader.book.book_id,
-      savePayload(progress, progressBaseVersion, progressMeta(source, options)),
+      savePayload(progress, progressMeta(source, options)),
       options,
     );
-    return applySavedProgress(saved, progress);
+    return applySavedProgress(saved);
   } catch (error) {
     if (!options.quiet) {
       reader.error = error.message;
@@ -578,32 +549,20 @@ async function saveProgressNow(options = {}) {
   } finally {
     saveInFlight = false;
     reader.saving = false;
-    if (queuedServerSave) {
-      queuedServerSave = false;
-      void saveProgressNow({ quiet: true });
-    }
   }
 }
 
-function applySavedProgress(saved, attempted = null) {
+function applySavedProgress(saved) {
   const normalized = normalizeProgress(reader.book?.book_id, saved, { dirty: false });
   if (!normalized) {
-    return attempted;
+    return reader.progress;
   }
 
-  progressBaseVersion = normalized.version;
-  lastServerProgressKey = progressKey(normalized);
   const cached = cacheProgress(normalized.book_id, normalized, {
     dirty: false,
-    baseVersion: normalized.version,
   });
   reader.progress = cached;
   updateShelfBookProgress(cached);
-
-  if (isRemoteAhead(cached, attempted)) {
-    reader.visiblePercent = cached.percent;
-    restoreScroll(cached);
-  }
 
   return cached;
 }
@@ -646,10 +605,8 @@ function periodicProgressSave() {
     return;
   }
 
-  const progress = snapshotProgress({ source: "periodic" });
-  if (progressKey(progress) !== lastServerProgressKey) {
-    void saveProgressNow({ quiet: true, source: "periodic" });
-  }
+  snapshotProgress({ source: "periodic" });
+  void saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true });
 }
 
 function onReaderInteractionEnd() {
@@ -790,7 +747,7 @@ function seekProgress(event) {
   window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;
   snapshotProgress({ source: "seek", allowBackward: true });
-  scheduleProgressSave(250, { source: "seek", force: true, allowBackward: true });
+  scheduleProgressSave(250, { source: "seek", allowBackward: true });
 }
 
 function startSeek() {
