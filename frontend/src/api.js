@@ -73,6 +73,15 @@ export function saveProgress(id, progress, options = {}) {
   });
 }
 
+export function saveProgressKeepalive(id, progress) {
+  return request(`/api/books/${id}/progress`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(progress),
+    keepalive: true,
+  });
+}
+
 export function saveProgressBeacon(id, progress) {
   if (!navigator.sendBeacon) {
     return false;

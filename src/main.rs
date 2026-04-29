@@ -9,7 +9,12 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::Context;
 use api::router;
-use axum::http::HeaderValue;
+use axum::{
+    extract::Request,
+    http::{HeaderValue, header},
+    middleware::{self, Next},
+    response::Response,
+};
 use axum_server::tls_rustls::RustlsConfig;
 use config::Config;
 use db::{connect_db, migrate};
@@ -74,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         cors.allow_origin(Any)
     };
 
-    let app = router(state).layer(cors).layer(TraceLayer::new_for_http());
+    let app = router(state);
 
     let app = if Path::new("frontend/dist/index.html").exists() {
         app.fallback_service(
@@ -85,7 +90,10 @@ async fn main() -> anyhow::Result<()> {
         app.fallback(|| async {
             "TXT Reader API is running. Build the frontend with `npm run build` in ./frontend."
         })
-    };
+    }
+    .layer(cors)
+    .layer(middleware::from_fn(add_security_headers))
+    .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = config
         .listen
@@ -115,4 +123,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn add_security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests; block-all-mixed-content",
+        ),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+
+    response
 }

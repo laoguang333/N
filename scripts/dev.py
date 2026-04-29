@@ -19,7 +19,7 @@ def main() -> int:
     cargo = require("cargo")
     npm = require("npm")
 
-    if not (FRONTEND / "node_modules").exists():
+    if not frontend_dependencies_ready():
         run([npm, "ci"], FRONTEND)
 
     processes = [
@@ -59,6 +59,15 @@ def require(command: str) -> str:
     if not resolved:
         raise SystemExit(f"required command not found: {command}")
     return resolved
+
+
+def frontend_dependencies_ready() -> bool:
+    required_paths = [
+        FRONTEND / "node_modules" / "vite" / "bin" / "vite.js",
+        FRONTEND / "node_modules" / "@vitejs" / "plugin-vue" / "dist" / "index.mjs",
+        FRONTEND / "node_modules" / "vue" / "dist",
+    ]
+    return all(path.exists() for path in required_paths)
 
 
 def run(command: list[str], cwd: Path) -> None:

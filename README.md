@@ -53,6 +53,12 @@ npm run dev
 python scripts/codex.py build-frontend
 ```
 
+安装或更新前端依赖：
+
+```powershell
+python scripts/codex.py install-frontend
+```
+
 只构建后端可执行文件：
 
 ```powershell
@@ -90,6 +96,8 @@ python scripts/codex.py port
 ```powershell
 python scripts/codex.py check
 ```
+
+`build-frontend` 在已有 `frontend/node_modules` 时不会重装依赖，只执行前端构建，避免 Windows 上依赖文件被占用时 `npm ci` 删除失败。需要主动更新依赖时再运行 `install-frontend`。
 
 ## 生产构建
 

@@ -16,6 +16,11 @@ icon = "build"
 command = "python scripts/codex.py build-frontend"
 
 [[actions]]
+name = "安装前端依赖"
+icon = "download"
+command = "python scripts/codex.py install-frontend"
+
+[[actions]]
 name = "构建后端"
 icon = "build"
 command = "python scripts/codex.py build-backend"

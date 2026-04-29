@@ -23,6 +23,7 @@ def main() -> int:
     subcommands.add_parser("build-frontend")
     subcommands.add_parser("build-backend")
     subcommands.add_parser("build-all")
+    subcommands.add_parser("install-frontend")
     subcommands.add_parser("start-backend")
     subcommands.add_parser("dev")
     subcommands.add_parser("check")
@@ -39,6 +40,8 @@ def main() -> int:
         case "build-all":
             build_frontend()
             build_backend()
+        case "install-frontend":
+            install_frontend()
         case "start-backend":
             run([require("cargo"), "run"], ROOT)
         case "dev":
@@ -57,8 +60,27 @@ def main() -> int:
 
 def build_frontend() -> None:
     npm = require("npm")
-    run([npm, "ci"], FRONTEND)
+    ensure_frontend_deps(npm)
     run([npm, "run", "build"], FRONTEND)
+
+
+def install_frontend() -> None:
+    run([require("npm"), "install"], FRONTEND)
+
+
+def ensure_frontend_deps(npm: str) -> None:
+    if frontend_dependencies_ready():
+        return
+    run([npm, "ci"], FRONTEND)
+
+
+def frontend_dependencies_ready() -> bool:
+    required_paths = [
+        FRONTEND / "node_modules" / "vite" / "bin" / "vite.js",
+        FRONTEND / "node_modules" / "@vitejs" / "plugin-vue" / "dist" / "index.mjs",
+        FRONTEND / "node_modules" / "vue" / "dist",
+    ]
+    return all(path.exists() for path in required_paths)
 
 
 def build_backend() -> None:
