@@ -12,6 +12,8 @@ pub struct Config {
     pub scan_recursive: bool,
     pub scan_on_startup: bool,
     pub cors_allowed_origins: Option<Vec<String>>,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for Config {
@@ -23,6 +25,8 @@ impl Default for Config {
             scan_recursive: false,
             scan_on_startup: false,
             cors_allowed_origins: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -62,6 +66,8 @@ mod tests {
         assert!(!config.scan_recursive);
         assert!(!config.scan_on_startup);
         assert!(config.cors_allowed_origins.is_none());
+        assert!(config.tls_cert_path.is_none());
+        assert!(config.tls_key_path.is_none());
     }
 
     #[test]

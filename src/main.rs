@@ -10,6 +10,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use anyhow::Context;
 use api::router;
 use axum::http::HeaderValue;
+use axum_server::tls_rustls::RustlsConfig;
 use config::Config;
 use db::{connect_db, migrate};
 use library::scan_library;
@@ -90,10 +91,28 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .parse()
         .with_context(|| format!("invalid listen address: {}", config.listen))?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    match (&config.tls_cert_path, &config.tls_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .with_context(|| {
+                    format!("failed to load TLS certificate {cert_path} and key {key_path}")
+                })?;
 
-    tracing::info!("listening on http://{addr}");
-    axum::serve(listener, app).await?;
+            tracing::info!("listening on https://{addr}");
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        (None, None) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+
+            tracing::info!("listening on http://{addr}");
+            axum::serve(listener, app).await?;
+        }
+        _ => anyhow::bail!("tls_cert_path and tls_key_path must be configured together"),
+    }
 
     Ok(())
 }

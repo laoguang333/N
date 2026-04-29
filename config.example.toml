@@ -4,3 +4,5 @@ library_dirs = ["novels"]
 scan_recursive = false
 scan_on_startup = false
 # cors_allowed_origins = ["http://127.0.0.1:5173"]
+# tls_cert_path = "certs/server-cert.pem"
+# tls_key_path = "certs/server-key.pem"

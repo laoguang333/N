@@ -71,6 +71,40 @@ http://电脑局域网IP:3000
 
 如果无法访问，检查 Windows 防火墙是否允许当前 Rust 程序或 3000 端口入站连接。
 
+## 局域网 HTTPS
+
+PWA 的 Service Worker 需要可信 HTTPS。固定设备内网使用时，可以用项目脚本生成一个本地 CA 和局域网服务证书：
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File scripts/setup-local-https.ps1
+```
+
+脚本会：
+
+- 生成 `certs/local-ca.cer`、`certs/local-ca.pem`、`certs/server-cert.pem`、`certs/server-key.pem`。
+- 把本地 CA 安装到当前 Windows 用户的受信任根证书。
+- 自动把本机当前 IPv4 地址写入服务证书的 SAN。
+
+然后在 `config.toml` 中启用：
+
+```toml
+tls_cert_path = "certs/server-cert.pem"
+tls_key_path = "certs/server-key.pem"
+```
+
+重新启动后端后，用手机或 iPad 访问：
+
+```text
+https://电脑局域网IP:3000
+```
+
+其他设备也需要信任同一个 CA。把 `certs/local-ca.cer` 或 `certs/local-ca.pem` 传到手机上安装：
+
+- iOS / iPadOS：安装描述文件后，到“设置 -> 通用 -> 关于本机 -> 证书信任设置”中开启完全信任。
+- Android：在系统安全设置中安装 CA 证书。不同浏览器对用户 CA 的支持略有差异，Chrome 通常可以使用系统已安装的用户 CA。
+
+如果电脑的局域网 IP 变了，重新运行脚本并重启后端。
+
 ## 手机或 iPad 全屏阅读
 
 普通浏览器标签页不能被网页强制隐藏地址栏、前进后退栏或底部工具栏。项目已加入移动端 Web App/PWA 元信息；在 iPhone 或 iPad 上用 Safari 打开站点后，使用“分享”里的“添加到主屏幕”，之后从主屏幕图标启动，就会以独立窗口方式打开，阅读时不显示 Safari 的地址栏和底部导航栏。
@@ -86,12 +120,15 @@ library_dirs = ["novels"]
 scan_recursive = false
 scan_on_startup = false
 # cors_allowed_origins = ["http://127.0.0.1:5173"]
+# tls_cert_path = "certs/server-cert.pem"
+# tls_key_path = "certs/server-key.pem"
 ```
 
 - `library_dirs`：书库目录列表。
 - `scan_recursive`：默认 `false`，只扫描每个书库目录最外层 `.txt` 文件；设为 `true` 后递归扫描子目录。
 - `scan_on_startup`：启动后是否自动扫描书库。
 - `cors_allowed_origins`：默认未设置时允许任意来源，便于开发；需要收紧时配置允许的来源列表。
+- `tls_cert_path` / `tls_key_path`：同时配置后，后端直接以 HTTPS 方式监听。
 
 ## 检查
 
