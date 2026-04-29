@@ -9,6 +9,7 @@ pub struct BookSummary {
     pub size: i64,
     pub mtime: i64,
     pub encoding: String,
+    pub rating: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
     pub progress: Option<ReadingProgress>,
@@ -37,13 +38,32 @@ pub struct SaveProgressRequest {
     pub percent: f64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SaveRatingRequest {
+    pub rating: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScanResult {
     pub scanned: usize,
     pub removed: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct BookListQuery {
     pub search: Option<String>,
+    pub status: Option<String>,
+    pub min_rating: Option<i64>,
+    pub sort: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicConfig {
+    pub library_dirs: Vec<String>,
+    pub scan_recursive: bool,
+    pub scan_on_startup: bool,
 }

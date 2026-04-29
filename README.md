@@ -2,42 +2,110 @@
 
 家庭内网使用的 Web TXT 小说阅读器。后端使用 Axum + Rust + SQLite，前端使用 Vue + Vite。
 
-## 开发运行
+## 功能
 
-复制配置文件并修改小说目录：
+- 扫描一个或多个本地书库目录中的 `.txt` 文件。
+- 自动识别常见中文 TXT 编码并在浏览器中阅读。
+- 保存阅读进度，刷新或重新打开后恢复到最近位置。
+- 支持书架搜索、阅读状态筛选、评分筛选，以及最近阅读、标题、进度、评分排序。
+- 每本书支持 1-5 星评分，点击当前评分星级可清除评分。
+- 阅读页支持字号、行距、段距和纸色/夜间主题。
+
+## 首次运行
+
+复制配置文件：
 
 ```powershell
 Copy-Item config.example.toml config.toml
 ```
 
-后端：
+编辑 `config.toml`，把 `library_dirs` 改成 TXT 小说所在目录。默认配置会创建 `novels` 目录和 `data/reader.sqlite` 数据库。
+
+## 开发运行
+
+推荐使用 Python 脚本同时启动后端和前端：
+
+```powershell
+python scripts/dev.py
+```
+
+脚本会在缺少 `frontend/node_modules` 时先执行 `npm ci`，然后启动：
+
+- 后端：`cargo run`
+- 前端开发服务器：`npm run dev`
+
+也可以手动运行：
 
 ```powershell
 cargo run
-```
-
-前端开发服务器：
-
-```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-生产构建：
+## 生产构建
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run build
 cd ..
 cargo run
 ```
 
-然后在手机或 iPad 上访问：
+后端会在存在 `frontend/dist/index.html` 时直接托管前端静态文件。
+
+## 局域网访问
+
+默认监听地址是：
+
+```text
+0.0.0.0:3000
+```
+
+在手机或 iPad 上访问：
 
 ```text
 http://电脑局域网IP:3000
 ```
 
-扫描只会读取 `library_dirs` 中每个目录最外层的 `.txt` 文件，不递归子目录。
+如果无法访问，检查 Windows 防火墙是否允许当前 Rust 程序或 3000 端口入站连接。
+
+## 配置
+
+```toml
+listen = "0.0.0.0:3000"
+database_path = "data/reader.sqlite"
+library_dirs = ["novels"]
+scan_recursive = false
+scan_on_startup = false
+# cors_allowed_origins = ["http://127.0.0.1:5173"]
+```
+
+- `library_dirs`：书库目录列表。
+- `scan_recursive`：默认 `false`，只扫描每个书库目录最外层 `.txt` 文件；设为 `true` 后递归扫描子目录。
+- `scan_on_startup`：启动后是否自动扫描书库。
+- `cors_allowed_origins`：默认未设置时允许任意来源，便于开发；需要收紧时配置允许的来源列表。
+
+## 检查
+
+运行完整检查：
+
+```powershell
+python scripts/check.py
+```
+
+脚本会执行 Rust 格式化、Clippy、Rust 测试、前端依赖安装、前端测试和前端构建。
+
+## 数据与备份
+
+阅读进度、评分和书籍索引保存在 `database_path` 指定的 SQLite 数据库中。备份时复制 `.sqlite` 文件即可；如果服务正在运行，也一并保留同目录下可能存在的 `-wal` 和 `-shm` 文件。
+
+## 常见问题
+
+- 书架为空：确认 TXT 文件放在 `library_dirs` 指定目录；默认非递归扫描，子目录文件需要开启 `scan_recursive`。
+- 前端开发服务器无法请求 API：确认后端正在 3000 端口运行，Vite 会把 `/api` 代理到 `http://127.0.0.1:3000`。
+- `cargo` 无法下载依赖：检查网络、代理和系统证书；依赖缓存完整后可再次运行 `python scripts/check.py`。
+- 修改配置后无效：重启后端服务。
+
+更多接口和结构说明见 [API 文档](docs/api.md) 与 [架构文档](docs/architecture.md)。

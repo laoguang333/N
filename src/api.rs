@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use sqlx::{Row, SqlitePool};
 
@@ -12,13 +12,15 @@ use crate::{
     app_error::AppError,
     library::{read_book_content, require_book_path, scan_library},
     models::{
-        BookContent, BookListQuery, BookSummary, ReadingProgress, SaveProgressRequest, ScanResult,
+        BookContent, BookListQuery, BookSummary, PublicConfig, ReadingProgress,
+        SaveProgressRequest, SaveRatingRequest, ScanResult,
     },
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/config", get(public_config))
         .route("/api/books", get(list_books))
         .route("/api/books/{id}", get(get_book))
         .route("/api/books/{id}/content", get(get_book_content))
@@ -26,6 +28,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/books/{id}/progress",
             get(get_progress).put(save_progress),
         )
+        .route("/api/books/{id}/rating", put(save_rating))
         .route("/api/library/scan", post(scan))
         .with_state(state)
 }
@@ -34,8 +37,21 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
+async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
+    Json(PublicConfig {
+        library_dirs: state.config.library_dirs.clone(),
+        scan_recursive: state.config.scan_recursive,
+        scan_on_startup: state.config.scan_on_startup,
+    })
+}
+
 async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, AppError> {
-    let result = scan_library(&state.db, &state.config.library_dirs).await?;
+    let result = scan_library(
+        &state.db,
+        &state.config.library_dirs,
+        state.config.scan_recursive,
+    )
+    .await?;
     Ok(Json(result))
 }
 
@@ -49,22 +65,42 @@ async fn list_books(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"));
+    let status = normalize_status(query.status)?;
+    let sort = normalize_sort(query.sort)?;
+    let min_rating = normalize_min_rating(query.min_rating)?;
 
     let rows = sqlx::query(
         r#"
         SELECT
             b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
             p.updated_at AS progress_updated_at
         FROM books b
         LEFT JOIN reading_progress p ON p.book_id = b.id
-        WHERE (?1 IS NULL OR b.title LIKE ?1)
-        ORDER BY COALESCE(p.updated_at, b.updated_at) DESC, b.title COLLATE NOCASE ASC
+        WHERE
+            (?1 IS NULL OR b.title LIKE ?1)
+            AND (?2 IS NULL OR b.rating >= ?2)
+            AND (
+                ?3 IS NULL
+                OR (?3 = 'unread' AND (p.book_id IS NULL OR p.percent <= 0.0))
+                OR (?3 = 'reading' AND p.percent > 0.0 AND p.percent < 1.0)
+                OR (?3 = 'finished' AND p.percent >= 1.0)
+            )
+        ORDER BY
+            CASE WHEN ?4 = 'title' THEN b.title END COLLATE NOCASE ASC,
+            CASE WHEN ?4 = 'progress' THEN COALESCE(p.percent, 0.0) END DESC,
+            CASE WHEN ?4 = 'rating' THEN COALESCE(b.rating, 0) END DESC,
+            CASE WHEN ?4 = 'recent' THEN COALESCE(p.updated_at, b.updated_at) END DESC,
+            b.title COLLATE NOCASE ASC
         "#,
     )
     .bind(search)
+    .bind(min_rating)
+    .bind(status)
+    .bind(sort)
     .fetch_all(&state.db)
     .await?;
 
@@ -79,10 +115,15 @@ async fn get_book(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<BookSummary>, AppError> {
+    Ok(Json(fetch_book_summary(&state.db, id).await?))
+}
+
+async fn fetch_book_summary(db: &SqlitePool, id: i64) -> Result<BookSummary, AppError> {
     let row = sqlx::query(
         r#"
         SELECT
             b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
@@ -93,11 +134,11 @@ async fn get_book(
         "#,
     )
     .bind(id)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await?;
 
     let row = row.ok_or_else(|| AppError::NotFound("book not found".to_string()))?;
-    Ok(Json(book_from_row(row)?))
+    Ok(book_from_row(row)?)
 }
 
 async fn get_book_content(
@@ -173,6 +214,30 @@ async fn save_progress(
     Ok(Json(progress_from_row(row)?))
 }
 
+async fn save_rating(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<SaveRatingRequest>,
+) -> Result<Json<BookSummary>, AppError> {
+    require_book(&state.db, id).await?;
+
+    if let Some(rating) = payload.rating
+        && !(1..=5).contains(&rating)
+    {
+        return Err(AppError::BadRequest(
+            "rating must be between 1 and 5".to_string(),
+        ));
+    }
+
+    sqlx::query("UPDATE books SET rating = ?1 WHERE id = ?2")
+        .bind(payload.rating)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(fetch_book_summary(&state.db, id).await?))
+}
+
 async fn require_book(db: &SqlitePool, id: i64) -> Result<(String, String), AppError> {
     require_book_path(db, id).await.map_err(|error| {
         if error.to_string().contains("book not found") {
@@ -203,6 +268,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
         encoding: row.try_get("encoding")?,
+        rating: row.try_get("rating")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         progress,
@@ -216,4 +282,203 @@ fn progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadingProgress, sq
         percent: row.try_get("percent")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn normalize_status(status: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(status) = status.map(|value| value.trim().to_lowercase()) else {
+        return Ok(None);
+    };
+
+    match status.as_str() {
+        "" | "all" => Ok(None),
+        "unread" | "reading" | "finished" => Ok(Some(status)),
+        _ => Err(AppError::BadRequest(
+            "status must be one of all, unread, reading, finished".to_string(),
+        )),
+    }
+}
+
+fn normalize_sort(sort: Option<String>) -> Result<String, AppError> {
+    let sort = sort
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "recent".to_string());
+
+    match sort.as_str() {
+        "recent" | "title" | "progress" | "rating" => Ok(sort),
+        _ => Err(AppError::BadRequest(
+            "sort must be one of recent, title, progress, rating".to_string(),
+        )),
+    }
+}
+
+fn normalize_min_rating(min_rating: Option<i64>) -> Result<Option<i64>, AppError> {
+    match min_rating {
+        Some(rating) if !(1..=5).contains(&rating) => Err(AppError::BadRequest(
+            "min_rating must be between 1 and 5".to_string(),
+        )),
+        _ => Ok(min_rating),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use axum::extract::{Path, Query, State};
+
+    use crate::{
+        AppState,
+        config::Config,
+        db::{connect_db, migrate},
+        models::{BookListQuery, SaveRatingRequest},
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn save_rating_accepts_clear_and_rejects_out_of_range() {
+        let fixture = TestFixture::new("rating").await;
+        let id = fixture.insert_book("Book", 0.25, None).await;
+
+        let error = save_rating(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveRatingRequest { rating: Some(6) }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)));
+
+        let Json(book) = save_rating(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveRatingRequest { rating: Some(5) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(book.rating, Some(5));
+
+        let Json(book) = save_rating(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(SaveRatingRequest { rating: None }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(book.rating, None);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn list_books_filters_and_sorts_by_rating_and_status() {
+        let fixture = TestFixture::new("list-filters").await;
+        fixture.insert_book("Alpha", 0.0, Some(2)).await;
+        fixture.insert_book("Beta", 0.5, Some(5)).await;
+        fixture.insert_book("Gamma", 1.0, Some(4)).await;
+
+        let Json(rated) = list_books(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: None,
+                min_rating: Some(4),
+                sort: Some("rating".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rated
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma"]
+        );
+
+        let Json(reading) = list_books(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: Some("reading".to_string()),
+                min_rating: None,
+                sort: Some("title".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reading.len(), 1);
+        assert_eq!(reading[0].title, "Beta");
+
+        fixture.cleanup().await;
+    }
+
+    struct TestFixture {
+        root: std::path::PathBuf,
+        state: Arc<AppState>,
+    }
+
+    impl TestFixture {
+        async fn new(name: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "txt-reader-test-{}-{stamp}-{name}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let db_path = root.join("reader.sqlite");
+            let db = connect_db(db_path.to_str().unwrap()).await.unwrap();
+            migrate(&db).await.unwrap();
+            let state = Arc::new(AppState {
+                config: Config::default(),
+                db,
+            });
+
+            Self { root, state }
+        }
+
+        async fn insert_book(&self, title: &str, percent: f64, rating: Option<i64>) -> i64 {
+            let file_path = self.root.join(format!("{title}.txt"));
+            std::fs::write(&file_path, title).unwrap();
+            let id: i64 = sqlx::query_scalar(
+                r#"
+                INSERT INTO books (title, file_path, file_hash, size, mtime, encoding, rating)
+                VALUES (?1, ?2, ?3, 10, 1, 'UTF-8', ?4)
+                RETURNING id
+                "#,
+            )
+            .bind(title)
+            .bind(file_path.to_string_lossy().to_string())
+            .bind(format!("hash-{title}"))
+            .bind(rating)
+            .fetch_one(&self.state.db)
+            .await
+            .unwrap();
+
+            if percent > 0.0 {
+                sqlx::query(
+                    "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 10, ?2)",
+                )
+                .bind(id)
+                .bind(percent)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+            }
+
+            id
+        }
+
+        async fn cleanup(self) {
+            self.state.db.close().await;
+            let _ = std::fs::remove_dir_all(self.root);
+        }
+    }
 }

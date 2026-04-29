@@ -1,3 +1,6 @@
 listen = "0.0.0.0:3000"
 database_path = "data/reader.sqlite"
 library_dirs = ["novels"]
+scan_recursive = false
+scan_on_startup = false
+# cors_allowed_origins = ["http://127.0.0.1:5173"]

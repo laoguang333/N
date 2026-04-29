@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Star,
   Sun,
   Type,
   X,
@@ -16,10 +17,13 @@ import {
 import {
   getBookContent,
   getProgress,
+  getPublicConfig,
   listBooks,
   saveProgress,
+  saveRating,
   scanLibrary,
 } from "./api";
+import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
 
 const STORAGE_KEY = "txt-reader-settings";
 
@@ -31,8 +35,13 @@ const route = reactive({
 const shelf = reactive({
   books: [],
   search: "",
+  status: "all",
+  minRating: "",
+  sort: "recent",
+  config: null,
   loading: false,
   scanning: false,
+  ratingBookId: null,
   error: "",
   scanMessage: "",
 });
@@ -51,8 +60,10 @@ const settings = reactive(loadSettings());
 const readerRoot = ref(null);
 let saveTimer = null;
 let scrollTimer = null;
+let shelfTimer = null;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
+const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
 
 watch(
   () => ({ ...settings }),
@@ -63,10 +74,10 @@ watch(
 );
 
 watch(
-  () => shelf.search,
+  () => [shelf.search, shelf.status, shelf.minRating, shelf.sort],
   () => {
-    window.clearTimeout(shelf.searchTimer);
-    shelf.searchTimer = window.setTimeout(loadBooks, 180);
+    window.clearTimeout(shelfTimer);
+    shelfTimer = window.setTimeout(loadBooks, 180);
   },
 );
 
@@ -75,6 +86,7 @@ onMounted(() => {
   window.addEventListener("hashchange", parseHash);
   window.addEventListener("scroll", onReaderScroll, { passive: true });
   window.addEventListener("beforeunload", flushProgress);
+  loadConfig();
   loadBooks();
 });
 
@@ -84,6 +96,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("beforeunload", flushProgress);
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
+  window.clearTimeout(shelfTimer);
 });
 
 watch(
@@ -96,18 +109,7 @@ watch(
 );
 
 function loadSettings() {
-  const fallback = {
-    fontSize: 20,
-    lineHeight: 1.85,
-    paragraphSpacing: 16,
-    theme: "paper",
-  };
-
-  try {
-    return { ...fallback, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
-  } catch {
-    return fallback;
-  }
+  return parseSettings(localStorage.getItem(STORAGE_KEY));
 }
 
 function parseHash() {
@@ -122,11 +124,24 @@ function parseHash() {
   }
 }
 
+async function loadConfig() {
+  try {
+    shelf.config = await getPublicConfig();
+  } catch {
+    shelf.config = null;
+  }
+}
+
 async function loadBooks() {
   shelf.loading = true;
   shelf.error = "";
   try {
-    shelf.books = await listBooks(shelf.search);
+    shelf.books = await listBooks({
+      search: shelf.search,
+      status: shelf.status,
+      minRating: shelf.minRating,
+      sort: shelf.sort,
+    });
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -140,13 +155,28 @@ async function runScan() {
   shelf.scanMessage = "";
   try {
     const result = await scanLibrary();
-    shelf.scanMessage = `已扫描 ${result.scanned} 本，移除 ${result.removed} 本`;
+    shelf.scanMessage = formatScanMessage(result);
     await loadBooks();
+    await loadConfig();
   } catch (error) {
     shelf.error = error.message;
   } finally {
     shelf.scanning = false;
   }
+}
+
+function formatScanMessage(result) {
+  const parts = [
+    `扫描 ${result.scanned} 本`,
+    `新增 ${result.added || 0} 本`,
+    `更新 ${result.updated || 0} 本`,
+    `跳过 ${result.skipped || 0} 本`,
+    `移除 ${result.removed} 本`,
+  ];
+  if (result.errors?.length) {
+    parts.push(`错误 ${result.errors.length} 个`);
+  }
+  return parts.join(" · ");
 }
 
 async function openBook(bookId) {
@@ -172,27 +202,6 @@ async function openBook(bookId) {
   } finally {
     reader.loading = false;
   }
-}
-
-function buildParagraphs(content) {
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = normalized.split("\n");
-  const paragraphs = [];
-  let offset = 0;
-
-  for (const line of lines) {
-    const text = line.trim();
-    if (text) {
-      paragraphs.push({ offset, text });
-    }
-    offset += line.length + 1;
-  }
-
-  if (paragraphs.length === 0 && normalized.length > 0) {
-    paragraphs.push({ offset: 0, text: normalized });
-  }
-
-  return paragraphs;
 }
 
 function restoreScroll(charOffset) {
@@ -230,6 +239,14 @@ function scheduleProgressSave() {
   saveTimer = window.setTimeout(() => persistProgress(), 1200);
 }
 
+function progressPayload() {
+  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  return {
+    char_offset: currentOffset(),
+    percent: Math.min(1, Math.max(0, window.scrollY / maxScroll)),
+  };
+}
+
 function currentOffset() {
   const nodes = [...(readerRoot.value?.querySelectorAll("[data-offset]") || [])];
   const topLine = 88;
@@ -247,20 +264,19 @@ function currentOffset() {
   return Number(candidate?.dataset.offset || 0);
 }
 
-async function persistProgress() {
+async function persistProgress(options = {}) {
   if (!reader.book) {
     return;
   }
 
-  const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-  const percent = Math.min(1, Math.max(0, window.scrollY / maxScroll));
-  const char_offset = currentOffset();
   reader.saving = true;
 
   try {
-    reader.progress = await saveProgress(reader.book.book_id, { char_offset, percent });
+    reader.progress = await saveProgress(reader.book.book_id, progressPayload(), options);
   } catch (error) {
-    reader.error = error.message;
+    if (!options.keepalive) {
+      reader.error = error.message;
+    }
   } finally {
     reader.saving = false;
   }
@@ -269,7 +285,7 @@ async function persistProgress() {
 function flushProgress() {
   if (route.name === "reader" && reader.book) {
     window.clearTimeout(saveTimer);
-    persistProgress();
+    void persistProgress({ keepalive: true });
   }
 }
 
@@ -283,18 +299,29 @@ function openReader(bookId) {
   window.location.hash = `#/reader/${bookId}`;
 }
 
-function formatSize(size) {
-  if (size < 1024 * 1024) {
-    return `${Math.max(1, Math.round(size / 1024))} KB`;
+function openReaderByKeyboard(event, bookId) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    openReader(bookId);
   }
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function formatPercent(progress) {
-  if (!progress) {
-    return "未读";
+async function updateRating(book, rating) {
+  const nextRating = book.rating === rating ? null : rating;
+  shelf.ratingBookId = book.id;
+  shelf.error = "";
+
+  try {
+    const updated = await saveRating(book.id, nextRating);
+    const index = shelf.books.findIndex((item) => item.id === book.id);
+    if (index !== -1) {
+      shelf.books[index] = updated;
+    }
+  } catch (error) {
+    shelf.error = error.message;
+  } finally {
+    shelf.ratingBookId = null;
   }
-  return `${Math.round(progress.percent * 100)}%`;
 }
 </script>
 
@@ -317,6 +344,29 @@ function formatPercent(progress) {
         <input v-model="shelf.search" type="search" placeholder="搜索小说" />
       </div>
 
+      <div class="filter-bar">
+        <select v-model="shelf.status" aria-label="阅读状态">
+          <option value="all">全部状态</option>
+          <option value="unread">未读</option>
+          <option value="reading">在读</option>
+          <option value="finished">已读</option>
+        </select>
+        <select v-model="shelf.minRating" aria-label="最低评分">
+          <option value="">全部评分</option>
+          <option value="1">1 星以上</option>
+          <option value="2">2 星以上</option>
+          <option value="3">3 星以上</option>
+          <option value="4">4 星以上</option>
+          <option value="5">5 星</option>
+        </select>
+        <select v-model="shelf.sort" aria-label="排序">
+          <option value="recent">最近阅读</option>
+          <option value="title">标题</option>
+          <option value="progress">进度</option>
+          <option value="rating">评分</option>
+        </select>
+      </div>
+
       <p v-if="shelf.scanMessage" class="notice">{{ shelf.scanMessage }}</p>
       <p v-if="shelf.error" class="error">{{ shelf.error }}</p>
 
@@ -327,22 +377,41 @@ function formatPercent(progress) {
       <div v-else-if="shelf.books.length === 0" class="empty-state">
         <BookOpen :size="34" />
         <p>暂无小说</p>
+        <span>书库目录：{{ libraryHint }}</span>
       </div>
 
       <div v-else class="book-list">
-        <button
+        <article
           v-for="book in shelf.books"
           :key="book.id"
           class="book-row"
-          type="button"
+          role="button"
+          tabindex="0"
           @click="openReader(book.id)"
+          @keydown="openReaderByKeyboard($event, book.id)"
         >
           <span class="book-main">
             <strong>{{ book.title }}</strong>
             <span>{{ formatSize(book.size) }} · {{ book.encoding }}</span>
           </span>
-          <span class="book-progress">{{ formatPercent(book.progress) }}</span>
-        </button>
+          <span class="book-side">
+            <span class="book-progress">{{ formatPercent(book.progress) }}</span>
+            <span class="rating-row" @click.stop @keydown.stop>
+              <button
+                v-for="rating in 5"
+                :key="rating"
+                class="star-button"
+                :class="{ active: (book.rating || 0) >= rating }"
+                type="button"
+                :disabled="shelf.ratingBookId === book.id"
+                :title="book.rating === rating ? '清除评分' : `${rating} 星`"
+                @click="updateRating(book, rating)"
+              >
+                <Star :size="17" />
+              </button>
+            </span>
+          </span>
+        </article>
       </div>
     </section>
 

@@ -9,8 +9,10 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::Context;
 use api::router;
+use axum::http::HeaderValue;
 use config::Config;
 use db::{connect_db, migrate};
+use library::scan_library;
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -38,15 +40,38 @@ async fn main() -> anyhow::Result<()> {
     let db = connect_db(&config.database_path).await?;
     migrate(&db).await?;
 
+    if config.scan_on_startup {
+        let result = scan_library(&db, &config.library_dirs, config.scan_recursive).await?;
+        tracing::info!(
+            scanned = result.scanned,
+            added = result.added,
+            updated = result.updated,
+            skipped = result.skipped,
+            removed = result.removed,
+            errors = result.errors.len(),
+            "startup library scan complete"
+        );
+    }
+
     let state = Arc::new(AppState {
         config: config.clone(),
         db,
     });
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+    let cors = if let Some(origins) = &config.cors_allowed_origins {
+        let origins = origins
+            .iter()
+            .map(|origin| {
+                origin
+                    .parse::<HeaderValue>()
+                    .with_context(|| format!("invalid CORS origin: {origin}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        cors.allow_origin(origins)
+    } else {
+        cors.allow_origin(Any)
+    };
 
     let app = router(state).layer(cors).layer(TraceLayer::new_for_http());
 

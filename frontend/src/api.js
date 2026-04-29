@@ -19,12 +19,33 @@ async function request(path, options = {}) {
 }
 
 export function listBooks(search = "") {
+  if (typeof search === "object") {
+    return listBooksWithQuery(search);
+  }
+
+  return listBooksWithQuery({ search });
+}
+
+function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent" } = {}) {
   const params = new URLSearchParams();
   if (search.trim()) {
     params.set("search", search.trim());
   }
+  if (status && status !== "all") {
+    params.set("status", status);
+  }
+  if (minRating) {
+    params.set("min_rating", String(minRating));
+  }
+  if (sort && sort !== "recent") {
+    params.set("sort", sort);
+  }
   const suffix = params.toString() ? `?${params}` : "";
   return request(`/api/books${suffix}`);
+}
+
+export function getPublicConfig() {
+  return request("/api/config");
 }
 
 export function scanLibrary() {
@@ -43,10 +64,19 @@ export function getProgress(id) {
   return request(`/api/books/${id}/progress`);
 }
 
-export function saveProgress(id, progress) {
+export function saveProgress(id, progress, options = {}) {
   return request(`/api/books/${id}/progress`, {
     method: "PUT",
     headers: jsonHeaders,
     body: JSON.stringify(progress),
+    keepalive: Boolean(options.keepalive),
+  });
+}
+
+export function saveRating(id, rating) {
+  return request(`/api/books/${id}/rating`, {
+    method: "PUT",
+    headers: jsonHeaders,
+    body: JSON.stringify({ rating }),
   });
 }

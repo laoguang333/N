@@ -2,7 +2,7 @@ use std::{path::Path, str::FromStr};
 
 use anyhow::Context;
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
@@ -37,6 +37,7 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             size INTEGER NOT NULL,
             mtime INTEGER NOT NULL,
             encoding TEXT NOT NULL,
+            rating INTEGER CHECK (rating IS NULL OR (rating >= 1 AND rating <= 5)),
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         );
@@ -63,5 +64,61 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
 
+    if !column_exists(db, "books", "rating").await? {
+        sqlx::query(
+            "ALTER TABLE books ADD COLUMN rating INTEGER CHECK (rating IS NULL OR (rating >= 1 AND rating <= 5));",
+        )
+        .execute(db)
+        .await?;
+    }
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_books_rating ON books(rating);")
+        .execute(db)
+        .await?;
+
     Ok(())
+}
+
+async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(&pragma).fetch_all(db).await?;
+
+    Ok(rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == column)
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn migrate_creates_rating_column() {
+        let (dir, db_path) = temp_db_path("migrate-rating");
+        let db = connect_db(db_path.to_str().unwrap()).await.unwrap();
+
+        migrate(&db).await.unwrap();
+        migrate(&db).await.unwrap();
+
+        assert!(column_exists(&db, "books", "rating").await.unwrap());
+
+        db.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn temp_db_path(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "txt-reader-test-{}-{stamp}-{name}",
+            std::process::id()
+        ));
+        let db_path = dir.join("reader.sqlite");
+        (dir, db_path)
+    }
 }
