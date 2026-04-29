@@ -93,7 +93,7 @@ def cargo_run_command() -> list[str]:
 
 
 def setup_https() -> None:
-    openssl = require("openssl")
+    openssl = require_openssl()
     CERTS.mkdir(exist_ok=True)
 
     ca_key = CERTS / "local-ca-key.pem"
@@ -245,7 +245,7 @@ def kill_port_listener(port: int) -> None:
             "powershell",
             "-NoProfile",
             "-Command",
-            f"$pids = @(Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -ExpandProperty OwningProcess -Unique); if ($pids.Count -gt 0) {{ Stop-Process -Id $pids -Force }}",
+            f"$pids = @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique); if ($pids.Count -gt 0) {{ Stop-Process -Id $pids -Force -ErrorAction SilentlyContinue }}",
         ],
         cwd=ROOT,
         check=False,
@@ -268,6 +268,22 @@ def require(command: str) -> str:
     if not resolved:
         raise SystemExit(f"required command not found: {command}")
     return resolved
+
+
+def require_openssl() -> str:
+    resolved = shutil.which("openssl")
+    if resolved:
+        return resolved
+
+    candidates = [
+        r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+        r"C:\Program Files\Git\usr\bin\openssl.exe",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+
+    raise SystemExit("required command not found: openssl")
 
 
 def run(command: list[str], cwd: Path) -> None:

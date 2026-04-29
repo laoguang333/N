@@ -1,6 +1,6 @@
 listen = "0.0.0.0:234"
 database_path = "data/reader.sqlite"
-library_dirs = ["E:\\Videos\\小说"]
+library_dirs = ["C:\\Users\\Administrator\\Music\\rust\\n\\logs"]
 scan_recursive = false
 scan_on_startup = false
 tls_cert_path = "certs/server-cert.pem"
