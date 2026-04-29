@@ -82,6 +82,7 @@ let saveInFlight = false;
 let queuedServerSave = false;
 let lastServerProgressKey = "";
 let progressBaseVersion = null;
+let restoreSavingBlocked = false;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -243,6 +244,7 @@ async function openBook(bookId) {
   reader.pendingSeekPercent = null;
   progressBaseVersion = null;
   lastServerProgressKey = "";
+  restoreSavingBlocked = true;
   window.scrollTo({ top: 0 });
 
   try {
@@ -267,13 +269,19 @@ async function openBook(bookId) {
     await afterNextPaint();
     updateVisibleProgress();
     reader.loading = false;
+    window.setTimeout(() => {
+      restoreSavingBlocked = false;
+    }, 250);
     if (shouldSync) {
       cacheProgress(bookId, restoredProgress, { dirty: true, baseVersion: progressBaseVersion });
       scheduleProgressSave(250, { force: true });
+    } else if (!serverProgress) {
+      scheduleProgressSave(300, { force: true });
     }
   } catch (error) {
     reader.error = error.message;
     reader.loading = false;
+    restoreSavingBlocked = false;
   }
 }
 
@@ -300,10 +308,10 @@ function matchesShelfStatus(book, status) {
 
   const percent = book.progress?.percent || 0;
   if (status === "unread") {
-    return percent <= 0;
+    return !book.progress;
   }
   if (status === "reading") {
-    return percent > 0 && percent < 1;
+    return Boolean(book.progress) && percent < 1;
   }
   if (status === "finished") {
     return percent >= 1;
@@ -353,6 +361,7 @@ function restoreScrollPercent(percent) {
   window.requestAnimationFrame(() => {
     const maxScroll = maxScrollTop();
     window.scrollTo({ top: maxScroll * Math.min(1, Math.max(0, percent)) });
+    window.requestAnimationFrame(updateVisibleProgress);
   });
 }
 
@@ -432,7 +441,11 @@ function markShelfScroll() {
 }
 
 function canSaveReaderProgress() {
-  return route.name === "reader" && reader.book && reader.paragraphs.length > 0;
+  return route.name === "reader"
+    && reader.book
+    && reader.paragraphs.length > 0
+    && !reader.loading
+    && !restoreSavingBlocked;
 }
 
 function snapshotProgress(options = {}) {
@@ -547,7 +560,7 @@ function nearestParagraph(charOffset) {
 }
 
 function onReaderScroll() {
-  if (route.name !== "reader" || !reader.book) {
+  if (!canSaveReaderProgress()) {
     return;
   }
 

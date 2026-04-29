@@ -63,8 +63,11 @@ export function formatSize(size) {
 }
 
 export function formatPercent(progress) {
-  if (!progress || progress.percent <= 0) {
+  if (!progress) {
     return "未读";
+  }
+  if (progress.percent <= 0) {
+    return "0%";
   }
   if (progress.percent >= 1) {
     return "已读";

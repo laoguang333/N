@@ -86,8 +86,8 @@ async fn list_books(
             AND (?2 IS NULL OR b.rating >= ?2)
             AND (
                 ?3 IS NULL
-                OR (?3 = 'unread' AND (p.book_id IS NULL OR p.percent <= 0.0))
-                OR (?3 = 'reading' AND p.percent > 0.0 AND p.percent < 1.0)
+                OR (?3 = 'unread' AND p.book_id IS NULL)
+                OR (?3 = 'reading' AND p.book_id IS NOT NULL AND p.percent < 1.0)
                 OR (?3 = 'finished' AND p.percent >= 1.0)
             )
         ORDER BY
@@ -406,7 +406,8 @@ mod tests {
     #[tokio::test]
     async fn list_books_filters_and_sorts_by_rating_and_status() {
         let fixture = TestFixture::new("list-filters").await;
-        fixture.insert_book("Alpha", 0.0, Some(2)).await;
+        fixture.insert_book("Alpha", -1.0, Some(2)).await;
+        fixture.insert_book("Opened", 0.0, Some(3)).await;
         fixture.insert_book("Beta", 0.5, Some(5)).await;
         fixture.insert_book("Gamma", 1.0, Some(4)).await;
 
@@ -440,8 +441,28 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(reading.len(), 1);
-        assert_eq!(reading[0].title, "Beta");
+        assert_eq!(reading.len(), 2);
+        assert_eq!(
+            reading
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Opened"]
+        );
+
+        let Json(unread) = list_books(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: Some("unread".to_string()),
+                min_rating: None,
+                sort: Some("title".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].title, "Alpha");
 
         fixture.cleanup().await;
     }
@@ -449,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn save_progress_versions_prevent_stale_backward_overwrite() {
         let fixture = TestFixture::new("progress-version").await;
-        let id = fixture.insert_book("Book", 0.0, None).await;
+        let id = fixture.insert_book("Book", -1.0, None).await;
 
         let Json(first) = save_progress(
             State(fixture.state.clone()),
@@ -541,7 +562,7 @@ mod tests {
             .await
             .unwrap();
 
-            if percent > 0.0 {
+            if percent >= 0.0 {
                 sqlx::query(
                     "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 10, ?2)",
                 )

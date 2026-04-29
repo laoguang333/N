@@ -34,6 +34,7 @@ describe("reader helpers", () => {
     expect(formatSize(100)).toBe("1 KB");
     expect(formatSize(2 * 1024 * 1024)).toBe("2.0 MB");
     expect(formatPercent(null)).toBe("未读");
+    expect(formatPercent({ percent: 0 })).toBe("0%");
     expect(formatPercent({ percent: 0.425 })).toBe("43%");
     expect(formatPercent({ percent: 1 })).toBe("已读");
   });
