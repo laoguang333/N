@@ -584,6 +584,40 @@ h1 {
   animation: spin 0.9s linear infinite;
 }
 
+.save-toast {
+  position: fixed;
+  top: 68px;
+  right: 18px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 10%);
+  line-height: 1.4;
+}
+
+.save-toast.toast-fade-enter-active {
+  transition: all 0.22s ease-out;
+}
+
+.save-toast.toast-fade-leave-active {
+  transition: all 0.28s ease-in;
+}
+
+.save-toast.toast-fade-enter-from,
+.save-toast.toast-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

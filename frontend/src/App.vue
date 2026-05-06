@@ -1,9 +1,9 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
+  AlertTriangle,
   ArrowLeft,
   BookOpen,
-  Check,
   LoaderCircle,
   Moon,
   RefreshCw,
@@ -61,8 +61,8 @@ const shelf = reactive({
 
 const reader = reactive({
   loading: false,
-  saving: false,
   error: "",
+  toast: "",
   book: null,
   paragraphs: [],
   searchOpen: false,
@@ -87,6 +87,10 @@ let periodicSaveTimer = null;
 let progressFrame = null;
 let saveInFlight = false;
 let restoreSavingBlocked = false;
+let lastSaveSucceeded = true;
+let saveFailureCount = 0;
+let toastTimer = null;
+const SAVE_BASE_INTERVAL = 3000;
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -119,7 +123,7 @@ onMounted(() => {
   window.addEventListener("pointerup", onReaderInteractionEnd, { passive: true });
   document.addEventListener("scroll", onReaderScroll, { passive: true });
   document.addEventListener("visibilitychange", onVisibilityChange);
-  periodicSaveTimer = window.setInterval(periodicProgressSave, 3000);
+  periodicSaveTimer = window.setTimeout(periodicProgressSave, SAVE_BASE_INTERVAL);
   loadConfig();
   loadBooks();
 });
@@ -136,7 +140,8 @@ onBeforeUnmount(() => {
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
   window.clearTimeout(shelfTimer);
-  window.clearInterval(periodicSaveTimer);
+  window.clearTimeout(periodicSaveTimer);
+  window.clearTimeout(toastTimer);
   if (progressFrame) {
     window.cancelAnimationFrame(progressFrame);
   }
@@ -461,6 +466,14 @@ function markShelfScroll() {
   }
 }
 
+function showToast(message) {
+  window.clearTimeout(toastTimer);
+  reader.toast = message;
+  toastTimer = window.setTimeout(() => {
+    reader.toast = "";
+  }, 4500);
+}
+
 function canSaveReaderProgress() {
   return route.name === "reader"
     && reader.book
@@ -516,22 +529,20 @@ async function saveProgressNow(options = {}) {
   }
 
   saveInFlight = true;
-  reader.saving = true;
   try {
     const saved = await saveProgress(
       reader.book.book_id,
       savePayload(progress, progressMeta(source, options)),
       options,
     );
+    lastSaveSucceeded = true;
     return applySavedProgress(saved);
   } catch (error) {
-    if (!options.quiet) {
-      reader.error = error.message;
-    }
+    lastSaveSucceeded = false;
+    showToast(`保存失败: ${error.message}`);
     return progress;
   } finally {
     saveInFlight = false;
-    reader.saving = false;
   }
 }
 
@@ -583,13 +594,28 @@ function scheduleProgressSave(delay = 650, options = {}) {
   saveTimer = window.setTimeout(() => saveProgressNow({ quiet: true, ...options }), delay);
 }
 
+function scheduleNextPeriodicSave(delay = SAVE_BASE_INTERVAL) {
+  window.clearTimeout(periodicSaveTimer);
+  periodicSaveTimer = window.setTimeout(periodicProgressSave, delay);
+}
+
 function periodicProgressSave() {
   if (!canSaveReaderProgress() || reader.loading) {
+    scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
     return;
   }
 
   snapshotProgress({ source: "periodic" });
-  void saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true });
+  saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true }).then(() => {
+    if (lastSaveSucceeded) {
+      saveFailureCount = 0;
+      scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
+    } else {
+      saveFailureCount += 1;
+      const delay = SAVE_BASE_INTERVAL * Math.pow(4, saveFailureCount);
+      scheduleNextPeriodicSave(delay);
+    }
+  });
 }
 
 function onReaderInteractionEnd() {
@@ -892,7 +918,6 @@ async function updateRating(book, rating) {
         </button>
         <div class="reader-title">
           <strong>{{ reader.book?.title || "Reading" }}</strong>
-          <span v-if="reader.saving"><Check :size="14" /> Saved</span>
         </div>
         <div class="toolbar-actions">
           <button class="icon-button" type="button" @click="toggleSearchPanel" title="Search">
@@ -903,6 +928,13 @@ async function updateRating(book, rating) {
           </button>
         </div>
       </header>
+
+      <transition name="toast-fade">
+        <div v-if="reader.toast" class="save-toast" role="alert">
+          <AlertTriangle :size="14" />
+          <span>{{ reader.toast }}</span>
+        </div>
+      </transition>
 
       <p v-if="reader.error" class="error reader-error">{{ reader.error }}</p>
       <div v-if="reader.loading" class="empty-state reader-loading">
