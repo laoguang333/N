@@ -1,4 +1,6 @@
-import { normalizeChinese, normalizeChineseQuery } from "./chinese";
+function normalizeText(text) {
+  return String(text).replace(/\s+/g, " ").trim().toLowerCase();
+}
 
 export function buildSearchIndex(paragraphs) {
   let totalLength = 0;
@@ -6,7 +8,7 @@ export function buildSearchIndex(paragraphs) {
 
   for (const paragraph of paragraphs || []) {
     const rawText = String(paragraph.text || "");
-    const normalizedText = normalizeChinese(rawText);
+    const normalizedText = normalizeText(rawText);
     const length = Math.max(1, rawText.length);
     entries.push({
       offset: Number(paragraph.offset) || 0,
@@ -21,7 +23,7 @@ export function buildSearchIndex(paragraphs) {
 }
 
 export function searchParagraphs(paragraphs, query) {
-  const normalizedQuery = normalizeChineseQuery(query);
+  const normalizedQuery = normalizeText(query);
   if (!normalizedQuery) {
     return [];
   }
