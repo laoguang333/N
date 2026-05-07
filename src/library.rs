@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use tokio::{fs, io::AsyncReadExt};
 
+use zhconv::{zhconv, Variant};
+
 use crate::models::ScanResult;
 
 #[derive(Debug)]
@@ -274,7 +276,8 @@ pub async fn read_book_content(path: &str) -> anyhow::Result<(String, String)> {
     let bytes = read_all(Path::new(path)).await?;
     let encoding = detect_encoding(&bytes);
     let (text, _, _) = encoding.decode(&bytes);
-    Ok((text.into_owned(), encoding.name().to_string()))
+    let simplified = zhconv(&text, Variant::ZhCN);
+    Ok((simplified, encoding.name().to_string()))
 }
 
 async fn remove_missing_books(
