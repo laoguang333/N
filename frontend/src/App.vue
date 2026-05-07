@@ -34,6 +34,7 @@ import {
 } from "./progress";
 import { buildParagraphs, buildParagraphOffsetMap, findParagraphIndex, formatPercent, formatSize, parseSettings } from "./reader";
 import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
+import AutoScroll from "./AutoScroll.vue";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -76,6 +77,8 @@ const reader = reactive({
   progressSeeking: false,
   pendingSeekPercent: null,
   settingsOpen: false,
+  autoScrollPlaying: false,
+  autoScrollSpeed: 5,
 });
 
 const settings = reactive(loadSettings());
@@ -299,6 +302,7 @@ async function openBook(bookId) {
   reader.searchQuery = "";
   reader.searchResults = [];
   reader.activeSearchId = "";
+  reader.autoScrollPlaying = false;
   searchIndex = null;
   paraOffsetMap = null;
   matchMap = null;
@@ -591,6 +595,12 @@ function applySavedProgress(saved) {
   return cached;
 }
 
+function onUserInterruptAutoScroll() {
+  if (reader.autoScrollPlaying) {
+    reader.autoScrollPlaying = false;
+  }
+}
+
 function onReaderScroll() {
   if (!canSaveReaderProgress()) {
     return;
@@ -764,6 +774,7 @@ function seekProgress(event) {
 function startSeek() {
   reader.progressSeeking = true;
   reader.controlsVisible = true;
+  reader.autoScrollPlaying = false;
 }
 
 function endSeek() {
@@ -950,6 +961,7 @@ async function updateRating(book, rating) {
         }"
         @click="toggleReaderControls"
         @scroll.passive="onReaderScroll"
+        @wheel.passive="onUserInterruptAutoScroll"
       >
         <div
           :style="{
@@ -1012,6 +1024,11 @@ async function updateRating(book, rating) {
         />
         <span>{{ readerProgressLabel }}</span>
       </div>
+
+      <AutoScroll
+        v-model:playing="reader.autoScrollPlaying"
+        v-model:speed="reader.autoScrollSpeed"
+      />
 
       <aside v-if="reader.settingsOpen" class="settings-panel">
         <div class="settings-header">
