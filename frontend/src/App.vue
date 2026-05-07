@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -31,8 +32,8 @@ import {
   normalizeProgress,
   savePayload,
 } from "./progress";
-import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
-import { highlightParagraph, searchParagraphs } from "./search";
+import { buildParagraphs, buildParagraphOffsetMap, findParagraphIndex, formatPercent, formatSize, parseSettings } from "./reader";
+import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -90,7 +91,18 @@ let restoreSavingBlocked = false;
 let lastSaveSucceeded = true;
 let saveFailureCount = 0;
 let toastTimer = null;
+let searchDebounceTimer = null;
+let searchIndex = null;
+let paraOffsetMap = null;
+let matchMap = null;
 const SAVE_BASE_INTERVAL = 3000;
+
+const virtualizer = useVirtualizer({
+  get count() { return reader.paragraphs.length; },
+  getScrollElement: () => readerRoot.value,
+  estimateSize: () => 80,
+  overscan: 30,
+});
 
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
@@ -113,15 +125,22 @@ watch(
   },
 );
 
+watch(
+  () => [settings.fontSize, settings.lineHeight, settings.paragraphSpacing],
+  () => {
+    nextTick(() => {
+      virtualizer.value.measure();
+    });
+  },
+);
+
 onMounted(() => {
   parseHash();
   window.addEventListener("hashchange", parseHash);
-  window.addEventListener("scroll", onReaderScroll, { passive: true });
   window.addEventListener("beforeunload", flushProgress);
   window.addEventListener("pagehide", flushProgress);
   window.addEventListener("touchend", onReaderInteractionEnd, { passive: true });
   window.addEventListener("pointerup", onReaderInteractionEnd, { passive: true });
-  document.addEventListener("scroll", onReaderScroll, { passive: true });
   document.addEventListener("visibilitychange", onVisibilityChange);
   periodicSaveTimer = window.setTimeout(periodicProgressSave, SAVE_BASE_INTERVAL);
   loadConfig();
@@ -130,18 +149,17 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("hashchange", parseHash);
-  window.removeEventListener("scroll", onReaderScroll);
   window.removeEventListener("beforeunload", flushProgress);
   window.removeEventListener("pagehide", flushProgress);
   window.removeEventListener("touchend", onReaderInteractionEnd);
   window.removeEventListener("pointerup", onReaderInteractionEnd);
-  document.removeEventListener("scroll", onReaderScroll);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
   window.clearTimeout(shelfTimer);
   window.clearTimeout(periodicSaveTimer);
   window.clearTimeout(toastTimer);
+  window.clearTimeout(searchDebounceTimer);
   if (progressFrame) {
     window.cancelAnimationFrame(progressFrame);
   }
@@ -281,8 +299,14 @@ async function openBook(bookId) {
   reader.searchQuery = "";
   reader.searchResults = [];
   reader.activeSearchId = "";
+  searchIndex = null;
+  paraOffsetMap = null;
+  matchMap = null;
   restoreSavingBlocked = true;
-  window.scrollTo({ top: 0 });
+  const el = readerRoot.value;
+  if (el) {
+    el.scrollTop = 0;
+  }
 
   try {
     const [content, progress] = await Promise.all([
@@ -295,6 +319,8 @@ async function openBook(bookId) {
     reader.progress = restoredProgress;
     reader.visiblePercent = restoredProgress?.percent || 0;
     reader.paragraphs = buildParagraphs(content.content);
+    searchIndex = buildSearchIndex(reader.paragraphs);
+    paraOffsetMap = buildParagraphOffsetMap(reader.paragraphs);
     reader.searchResults = [];
     reader.activeSearchId = "";
     reader.controlsVisible = window.matchMedia("(min-width: 760px)").matches;
@@ -355,26 +381,30 @@ function restoreScroll(progress) {
     return;
   }
 
-  if (Number.isFinite(progress.percent)) {
+  if (Number.isFinite(progress.percent) && progress.percent > 0) {
     restoreScrollPercent(progress.percent || 0);
     return;
   }
 
-  const target = readerRoot.value?.querySelector(`[data-offset="${progress.char_offset}"]`)
-    || nearestParagraph(progress.char_offset);
-
-  if (target) {
-    target.scrollIntoView({ block: "start" });
-    return;
+  if (progress.char_offset > 0 && paraOffsetMap) {
+    const index = findParagraphIndex(progress.char_offset, paraOffsetMap);
+    if (index > 0) {
+      virtualizer.value.scrollToIndex(index, { align: "start" });
+      return;
+    }
   }
 
   restoreScrollPercent(0);
 }
 
 function restoreScrollPercent(percent) {
+  const el = readerRoot.value;
+  if (!el) {
+    return;
+  }
   window.requestAnimationFrame(() => {
-    const maxScroll = maxScrollTop();
-    window.scrollTo({ top: maxScroll * Math.min(1, Math.max(0, percent)) });
+    const maxScroll = Math.max(1, el.scrollHeight - el.clientHeight);
+    el.scrollTo({ top: maxScroll * Math.min(1, Math.max(0, percent)) });
     window.requestAnimationFrame(updateVisibleProgress);
   });
 }
@@ -561,19 +591,6 @@ function applySavedProgress(saved) {
   return cached;
 }
 
-function nearestParagraph(charOffset) {
-  const nodes = [...(readerRoot.value?.querySelectorAll("[data-offset]") || [])];
-  let best = nodes[0];
-  for (const node of nodes) {
-    if (Number(node.dataset.offset) <= charOffset) {
-      best = node;
-    } else {
-      break;
-    }
-  }
-  return best;
-}
-
 function onReaderScroll() {
   if (!canSaveReaderProgress()) {
     return;
@@ -628,18 +645,18 @@ function onReaderInteractionEnd() {
 function progressPayload() {
   const percent = reader.pendingSeekPercent ?? currentScrollPercent();
   return {
-    char_offset: reader.pendingSeekPercent === null ? currentOffset() : offsetForPercent(percent),
+    char_offset: offsetForPercent(percent),
     percent,
   };
 }
 
 function currentScrollPercent() {
-  return Math.min(1, Math.max(0, window.scrollY / maxScrollTop()));
-}
-
-function maxScrollTop() {
-  const scroller = document.scrollingElement || document.documentElement;
-  return Math.max(1, scroller.scrollHeight - window.innerHeight);
+  const el = readerRoot.value;
+  if (!el) {
+    return 0;
+  }
+  const maxScroll = Math.max(1, el.scrollHeight - el.clientHeight);
+  return Math.min(1, Math.max(0, el.scrollTop / maxScroll));
 }
 
 function updateVisibleProgress() {
@@ -650,12 +667,15 @@ function updateSearchResults() {
   if (!reader.book) {
     reader.searchResults = [];
     reader.activeSearchId = "";
+    matchMap = null;
     return;
   }
 
-  reader.searchResults = searchParagraphs(reader.paragraphs, reader.searchQuery);
-  if (!reader.searchResults.some((item) => item.id === reader.activeSearchId)) {
-    reader.activeSearchId = reader.searchResults[0]?.id || "";
+  const results = searchWithIndex(searchIndex, reader.searchQuery);
+  reader.searchResults = results;
+  matchMap = buildMatchMap(results);
+  if (!results.some((item) => item.id === reader.activeSearchId)) {
+    reader.activeSearchId = results[0]?.id || "";
   }
   queueSearchResultReveal();
 }
@@ -663,7 +683,8 @@ function updateSearchResults() {
 watch(
   () => [reader.searchQuery, reader.paragraphs.length],
   () => {
-    updateSearchResults();
+    window.clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = window.setTimeout(updateSearchResults, 200);
   },
 );
 
@@ -681,14 +702,13 @@ function selectSearchResult(result) {
 }
 
 function scrollToSearchResult(result) {
-  if (!result) {
+  if (!result || !paraOffsetMap) {
     return;
   }
 
-  const target = readerRoot.value?.querySelector(`[data-offset="${result.paragraphOffset}"]`)
-    || nearestParagraph(result.paragraphOffset);
-  if (target) {
-    target.scrollIntoView({ block: "start" });
+  const index = findParagraphIndex(result.paragraphOffset, paraOffsetMap);
+  if (index >= 0) {
+    virtualizer.value.scrollToIndex(index, { align: "start" });
     window.requestAnimationFrame(() => {
       updateVisibleProgress();
     });
@@ -713,56 +733,32 @@ function queueSearchResultReveal(targetId = reader.activeSearchId) {
 }
 
 function paragraphMatches(offset) {
-  return reader.searchResults.filter((item) => item.paragraphOffset === offset);
-}
-
-function currentOffset() {
-  const nodes = [...(readerRoot.value?.querySelectorAll("[data-offset]") || [])];
-  const topLine = 88;
-  let candidate = nodes[0];
-
-  for (const node of nodes) {
-    const rect = node.getBoundingClientRect();
-    if (rect.top <= topLine) {
-      candidate = node;
-    } else {
-      break;
-    }
-  }
-
-  return Number(candidate?.dataset.offset || 0);
+  return matchMap?.get(offset) || [];
 }
 
 function offsetForPercent(percent) {
-  const nodes = [...(readerRoot.value?.querySelectorAll("[data-offset]") || [])];
-  if (nodes.length === 0) {
+  const safePercent = Math.min(1, Math.max(0, percent));
+  if (!searchIndex || !paraOffsetMap) {
     return 0;
   }
 
-  const maxScroll = maxScrollTop();
-  const targetY = maxScroll * Math.min(1, Math.max(0, percent)) + 88;
-  let candidate = nodes[0];
-
-  for (const node of nodes) {
-    const absoluteTop = window.scrollY + node.getBoundingClientRect().top;
-    if (absoluteTop <= targetY) {
-      candidate = node;
-    } else {
-      break;
-    }
+  const targetOffset = safePercent * searchIndex.totalLength;
+  const index = findParagraphIndex(targetOffset, paraOffsetMap);
+  if (index < 0 || !reader.paragraphs[index]) {
+    return 0;
   }
-
-  return Number(candidate?.dataset.offset || 0);
+  return reader.paragraphs[index].offset;
 }
 
 function seekProgress(event) {
   const value = Number(event.target.value) / 1000;
-  const maxScroll = maxScrollTop();
   reader.pendingSeekPercent = value;
-  window.scrollTo({ top: maxScroll * value, behavior: "auto" });
   reader.visiblePercent = value;
-  snapshotProgress({ source: "seek", allowBackward: true });
-  scheduleProgressSave(250, { source: "seek", allowBackward: true });
+  const el = readerRoot.value;
+  if (el) {
+    const maxScroll = Math.max(1, el.scrollHeight - el.clientHeight);
+    el.scrollTo({ top: maxScroll * value, behavior: "auto" });
+  }
 }
 
 function startSeek() {
@@ -772,6 +768,8 @@ function startSeek() {
 
 function endSeek() {
   reader.progressSeeking = false;
+  snapshotProgress({ source: "seek", allowBackward: true });
+  scheduleProgressSave(250, { source: "seek", allowBackward: true });
   window.setTimeout(() => {
     reader.pendingSeekPercent = null;
   }, 1200);
@@ -911,7 +909,7 @@ async function updateRating(book, rating) {
       </div>
     </section>
 
-    <section v-else class="reader-view" @scroll.passive="onReaderScroll">
+    <section v-else class="reader-view">
       <header class="reader-toolbar" :class="{ 'is-visible': reader.controlsVisible || reader.settingsOpen }">
         <button class="icon-button" type="button" @click="goShelf" title="Back">
           <ArrowLeft :size="22" />
@@ -949,29 +947,49 @@ async function updateRating(book, rating) {
         :style="{
           '--reader-font-size': `${settings.fontSize}px`,
           '--reader-line-height': settings.lineHeight,
-          '--reader-paragraph-spacing': `${settings.paragraphSpacing}px`,
         }"
         @click="toggleReaderControls"
         @scroll.passive="onReaderScroll"
       >
-        <p
-          v-for="paragraph in reader.paragraphs"
-          :key="paragraph.offset"
-          :data-offset="paragraph.offset"
-          :class="{ 'is-match-target': paragraphMatches(paragraph.offset).some((item) => item.id === reader.activeSearchId) }"
+        <div
+          :style="{
+            height: `${virtualizer.getTotalSize()}px`,
+            width: '100%',
+            position: 'relative',
+          }"
         >
-          <template
-            v-for="(part, index) in highlightParagraph(
-              paragraph.text,
-              paragraphMatches(paragraph.offset),
-              reader.activeSearchId,
-            )"
-            :key="`${paragraph.offset}-${index}`"
+          <div
+            v-for="virtualRow in virtualizer.getVirtualItems()"
+            :key="virtualRow.key"
+            :ref="virtualizer.measureElement"
+            :data-index="virtualRow.index"
+            :style="{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start}px)`,
+              paddingBottom: `${settings.paragraphSpacing}px`,
+            }"
           >
-            <mark v-if="part.highlight" :class="{ 'is-active-match': part.active }">{{ part.text }}</mark>
-            <span v-else>{{ part.text }}</span>
-          </template>
-        </p>
+            <p
+              :data-offset="reader.paragraphs[virtualRow.index].offset"
+              :class="{ 'is-match-target': paragraphMatches(reader.paragraphs[virtualRow.index].offset).some((item) => item.id === reader.activeSearchId) }"
+            >
+              <template
+                v-for="(part, index) in highlightParagraph(
+                  reader.paragraphs[virtualRow.index].text,
+                  paragraphMatches(reader.paragraphs[virtualRow.index].offset),
+                  reader.activeSearchId,
+                )"
+                :key="`${reader.paragraphs[virtualRow.index].offset}-${index}`"
+              >
+                <mark v-if="part.highlight" :class="{ 'is-active-match': part.active }">{{ part.text }}</mark>
+                <span v-else>{{ part.text }}</span>
+              </template>
+            </p>
+          </div>
+        </div>
       </article>
 
       <div

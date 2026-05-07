@@ -22,13 +22,13 @@ export function buildSearchIndex(paragraphs) {
   return { entries, totalLength: Math.max(1, totalLength) };
 }
 
-export function searchParagraphs(paragraphs, query) {
+export function searchWithIndex(index, query) {
   const normalizedQuery = normalizeText(query);
-  if (!normalizedQuery) {
+  if (!normalizedQuery || !index) {
     return [];
   }
 
-  const { entries, totalLength } = buildSearchIndex(paragraphs);
+  const { entries, totalLength } = index;
   const results = [];
 
   for (const entry of entries) {
@@ -56,6 +56,23 @@ export function searchParagraphs(paragraphs, query) {
   }
 
   return results;
+}
+
+export function searchParagraphs(paragraphs, query) {
+  return searchWithIndex(buildSearchIndex(paragraphs), query);
+}
+
+export function buildMatchMap(results) {
+  const map = new Map();
+  for (const r of results) {
+    const list = map.get(r.paragraphOffset);
+    if (list) {
+      list.push(r);
+    } else {
+      map.set(r.paragraphOffset, [r]);
+    }
+  }
+  return map;
 }
 
 export function highlightParagraph(text, matches, activeId = "") {

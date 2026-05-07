@@ -55,6 +55,36 @@ export function buildParagraphs(content) {
   return paragraphs;
 }
 
+export function buildParagraphOffsetMap(paragraphs) {
+  const map = [];
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    map.push({
+      index: i,
+      offset: p.offset,
+      endOffset: p.offset + (p.text ? p.text.length : 0),
+    });
+  }
+  return map;
+}
+
+export function findParagraphIndex(targetOffset, offsetMap) {
+  if (!offsetMap || offsetMap.length === 0) {
+    return 0;
+  }
+  let lo = 0;
+  let hi = offsetMap.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsetMap[mid].offset <= targetOffset) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
+
 export function formatSize(size) {
   if (size < 1024 * 1024) {
     return `${Math.max(1, Math.round(size / 1024))} KB`;
