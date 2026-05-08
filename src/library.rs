@@ -30,6 +30,7 @@ struct ScannedBookFile {
     size: i64,
     mtime: i64,
     encoding: String,
+    folder_tag: Option<String>,
 }
 
 pub async fn scan_library(
@@ -46,6 +47,8 @@ pub async fn scan_library(
         skipped: 0,
         errors: Vec::new(),
     };
+
+    let library_roots = canonical_library_roots(library_dirs)?;
 
     for dir in library_dirs {
         let dir_path = PathBuf::from(dir);
@@ -70,7 +73,7 @@ pub async fn scan_library(
         for path in files {
             result.scanned += 1;
 
-            match scan_book_file(db, &path, &mut seen_paths).await {
+            match scan_book_file(db, &path, &mut seen_paths, &library_roots).await {
                 Ok(BookScanOutcome::Added) => result.added += 1,
                 Ok(BookScanOutcome::Updated) => result.updated += 1,
                 Ok(BookScanOutcome::Skipped) => result.skipped += 1,
@@ -127,6 +130,7 @@ async fn scan_book_file(
     db: &SqlitePool,
     path: &Path,
     seen_paths: &mut HashSet<String>,
+    library_roots: &[PathBuf],
 ) -> anyhow::Result<BookScanOutcome> {
     let metadata = fs::metadata(path).await?;
     let canonical_path = path.canonicalize()?;
@@ -138,6 +142,7 @@ async fn scan_book_file(
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default();
+    let folder_tag = compute_folder_tag(&file_path, library_roots);
 
     if let Some(existing) = existing_book_by_path(db, &file_path).await? {
         seen_paths.insert(file_path.clone());
@@ -145,12 +150,12 @@ async fn scan_book_file(
             return Ok(BookScanOutcome::Skipped);
         }
 
-        let scanned = read_scanned_book_file(path, file_path, size, mtime).await?;
+        let scanned = read_scanned_book_file(path, file_path, size, mtime, folder_tag.as_deref()).await?;
         update_book(db, existing.id, &scanned).await?;
         return Ok(BookScanOutcome::Updated);
     }
 
-    let scanned = read_scanned_book_file(path, file_path, size, mtime).await?;
+    let scanned = read_scanned_book_file(path, file_path, size, mtime, folder_tag.as_deref()).await?;
 
     if let Some(existing) = moved_book_by_hash(db, &scanned.file_hash, &scanned.file_path).await? {
         update_book(db, existing.id, &scanned).await?;
@@ -160,8 +165,8 @@ async fn scan_book_file(
 
     sqlx::query(
         r#"
-        INSERT INTO books (title, file_path, file_hash, size, mtime, encoding)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO books (title, file_path, file_hash, size, mtime, encoding, folder_tag)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
     )
     .bind(&scanned.title)
@@ -170,6 +175,7 @@ async fn scan_book_file(
     .bind(scanned.size)
     .bind(scanned.mtime)
     .bind(&scanned.encoding)
+    .bind(&scanned.folder_tag)
     .execute(db)
     .await?;
 
@@ -182,6 +188,7 @@ async fn read_scanned_book_file(
     file_path: String,
     size: i64,
     mtime: i64,
+    folder_tag: Option<&str>,
 ) -> anyhow::Result<ScannedBookFile> {
     let bytes = read_all(path).await?;
     Ok(ScannedBookFile {
@@ -191,6 +198,7 @@ async fn read_scanned_book_file(
         size,
         mtime,
         encoding: detect_encoding(&bytes).name().to_string(),
+        folder_tag: folder_tag.map(|s| s.to_string()),
     })
 }
 
@@ -248,8 +256,9 @@ async fn update_book(db: &SqlitePool, id: i64, scanned: &ScannedBookFile) -> any
             size = ?4,
             mtime = ?5,
             encoding = ?6,
+            folder_tag = ?7,
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?7
+        WHERE id = ?8
         "#,
     )
     .bind(&scanned.title)
@@ -258,11 +267,28 @@ async fn update_book(db: &SqlitePool, id: i64, scanned: &ScannedBookFile) -> any
     .bind(scanned.size)
     .bind(scanned.mtime)
     .bind(&scanned.encoding)
+    .bind(&scanned.folder_tag)
     .bind(id)
     .execute(db)
     .await?;
 
     Ok(())
+}
+
+fn compute_folder_tag(file_path: &str, library_roots: &[PathBuf]) -> Option<String> {
+    let path = Path::new(file_path);
+    for root in library_roots {
+        if let Ok(relative) = path.strip_prefix(root) {
+            let mut components = relative.components();
+            if let Some(first) = components.next() {
+                if components.next().is_some() {
+                    return Some(first.as_os_str().to_string_lossy().to_string());
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 
 fn title_from_path(path: &Path) -> String {

@@ -18,6 +18,10 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+export function getShelf() {
+  return request("/api/shelf");
+}
+
 export function listBooks(search = "") {
   if (typeof search === "object") {
     return listBooksWithQuery(search);
@@ -26,7 +30,7 @@ export function listBooks(search = "") {
   return listBooksWithQuery({ search });
 }
 
-function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent" } = {}) {
+function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}) {
   const params = new URLSearchParams();
   if (search.trim()) {
     params.set("search", search.trim());
@@ -39,6 +43,9 @@ function listBooksWithQuery({ search = "", status = "all", minRating = "", sort 
   }
   if (sort && sort !== "recent") {
     params.set("sort", sort);
+  }
+  if (folderTag) {
+    params.set("folder_tag", folderTag);
   }
   const suffix = params.toString() ? `?${params}` : "";
   return request(`/api/books${suffix}`);

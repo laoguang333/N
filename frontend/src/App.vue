@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
+  FolderClosed,
   LoaderCircle,
   Moon,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   getBookContent,
   getProgress,
   getPublicConfig,
+  getShelf,
   listBooks,
   saveProgress,
   saveProgressBeacon,
@@ -59,6 +61,8 @@ const shelf = reactive({
   ratingBookId: null,
   error: "",
   scanMessage: "",
+  folderTag: null,
+  folders: [],
 });
 
 const reader = reactive({
@@ -242,15 +246,24 @@ async function loadBooks() {
   shelf.loading = true;
   shelf.error = "";
   try {
-    const books = applyCachedProgress(
-      await listBooks({
-        search: shelf.search,
-        status: "all",
-        minRating: shelf.minRating,
-        sort: shelf.sort,
-      }),
-    );
-    shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
+    if (shelf.folderTag) {
+      const books = applyCachedProgress(
+        await listBooks({
+          search: shelf.search,
+          status: "all",
+          minRating: shelf.minRating,
+          sort: shelf.sort,
+          folderTag: shelf.folderTag,
+        }),
+      );
+      shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
+      shelf.folders = [];
+    } else {
+      const data = await getShelf();
+      const books = applyCachedProgress(data.books);
+      shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
+      shelf.folders = data.folders;
+    }
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -804,6 +817,18 @@ function openReader(bookId) {
   window.location.hash = `#/reader/${bookId}`;
 }
 
+function openFolder(tag) {
+  shelf.folderTag = tag;
+  shelf.search = "";
+  window.location.hash = "#/";
+}
+
+function goShelfRoot() {
+  shelf.folderTag = null;
+  shelf.search = "";
+  window.location.hash = "#/";
+}
+
 function openReaderByKeyboard(event, bookId) {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
@@ -836,7 +861,13 @@ async function updateRating(book, rating) {
       <header class="shelf-header">
         <div>
           <p class="eyebrow">TXT Reader</p>
-          <h1>书架</h1>
+          <h1 v-if="shelf.folderTag" class="folder-title">
+            <button class="icon-button" type="button" @click="goShelfRoot" title="返回书架">
+              <ArrowLeft :size="18" />
+            </button>
+            {{ shelf.folderTag }}
+          </h1>
+          <h1 v-else>书架</h1>
         </div>
         <button class="icon-button" type="button" :disabled="shelf.scanning" @click="runScan" title="扫描书库">
           <LoaderCircle v-if="shelf.scanning" class="spin" :size="22" />
@@ -879,13 +910,29 @@ async function updateRating(book, rating) {
         <LoaderCircle class="spin" :size="28" />
       </div>
 
-      <div v-else-if="shelf.books.length === 0" class="empty-state">
+      <div v-else-if="shelf.books.length === 0 && shelf.folders.length === 0" class="empty-state">
         <BookOpen :size="34" />
-        <p>暂无小说</p>
+        <p>{{ shelf.folderTag ? '此文件夹没有小说' : '暂无小说' }}</p>
         <span>书库目录：{{ libraryHint }}</span>
       </div>
 
       <div v-else class="book-list">
+        <article
+          v-for="folder in shelf.folders"
+          :key="folder.name"
+          class="book-row folder-row"
+          role="button"
+          tabindex="0"
+          @click="openFolder(folder.name)"
+          @keydown="(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFolder(folder.name) } }"
+        >
+          <span class="book-main">
+            <strong><FolderClosed :size="18" class="folder-icon" /> {{ folder.name }}</strong>
+            <span>{{ folder.book_count }} 本</span>
+          </span>
+          <span class="book-side" />
+        </article>
+
         <article
           v-for="book in shelf.books"
           :key="book.id"

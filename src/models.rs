@@ -10,6 +10,7 @@ pub struct BookSummary {
     pub mtime: i64,
     pub encoding: String,
     pub rating: Option<i64>,
+    pub folder_tag: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub progress: Option<ReadingProgress>,
@@ -63,6 +64,19 @@ pub struct BookListQuery {
     pub status: Option<String>,
     pub min_rating: Option<i64>,
     pub sort: Option<String>,
+    pub folder_tag: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShelfResponse {
+    pub books: Vec<BookSummary>,
+    pub folders: Vec<FolderSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FolderSummary {
+    pub name: String,
+    pub book_count: usize,
 }
 
 #[derive(Debug, Serialize)]

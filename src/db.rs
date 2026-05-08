@@ -73,6 +73,15 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+    if !column_exists(db, "books", "folder_tag").await? {
+        sqlx::query("ALTER TABLE books ADD COLUMN folder_tag TEXT;")
+            .execute(db)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_books_folder_tag ON books(folder_tag);")
+            .execute(db)
+            .await?;
+    }
+
     if !column_exists(db, "reading_progress", "version").await? {
         sqlx::query("ALTER TABLE reading_progress ADD COLUMN version INTEGER NOT NULL DEFAULT 1;")
             .execute(db)

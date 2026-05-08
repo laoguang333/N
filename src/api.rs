@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -13,8 +13,8 @@ use crate::{
     app_error::AppError,
     library::{read_book_content, require_book_path, scan_library},
     models::{
-        BookContent, BookListQuery, BookSummary, PublicConfig, ReadingProgress,
-        SaveProgressRequest, SaveRatingRequest, ScanResult,
+        BookContent, BookListQuery, BookSummary, FolderSummary, PublicConfig, ReadingProgress,
+        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfResponse,
     },
 };
 
@@ -22,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/config", get(public_config))
+        .route("/api/shelf", get(shelf))
         .route("/api/books", get(list_books))
         .route("/api/books/{id}", get(get_book))
         .route("/api/books/{id}/content", get(get_book_content))
@@ -56,24 +57,59 @@ async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, Ap
     Ok(Json(result))
 }
 
-async fn list_books(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<BookListQuery>,
-) -> Result<Json<Vec<BookSummary>>, AppError> {
-    let search = query
-        .search
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("%{value}%"));
-    let status = normalize_status(query.status)?;
-    let sort = normalize_sort(query.sort)?;
-    let min_rating = normalize_min_rating(query.min_rating)?;
+async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>, AppError> {
+    let all_books = list_books_internal(
+        &state.db, None, None, None::<&str>, "title", None::<&str>,
+    )
+    .await?;
 
+    let mut root_books: Vec<BookSummary> = Vec::new();
+    let mut tag_books: BTreeMap<String, Vec<BookSummary>> = BTreeMap::new();
+
+    for book in all_books {
+        if let Some(ref tag) = book.folder_tag {
+            tag_books.entry(tag.clone()).or_default().push(book);
+        } else {
+            root_books.push(book);
+        }
+    }
+
+    let mut folders: Vec<FolderSummary> = Vec::new();
+    for (tag, books) in tag_books {
+        if books.len() == 1 {
+            root_books.push(books.into_iter().next().unwrap());
+        } else {
+            folders.push(FolderSummary {
+                name: tag,
+                book_count: books.len(),
+            });
+        }
+    }
+
+    root_books.sort_by(|a, b| {
+        a.title
+            .to_lowercase()
+            .cmp(&b.title.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(Json(ShelfResponse { books: root_books, folders }))
+}
+
+async fn list_books_internal(
+    db: &SqlitePool,
+    search: Option<String>,
+    min_rating: Option<i64>,
+    status: Option<&str>,
+    sort: &str,
+    folder_tag: Option<&str>,
+) -> Result<Vec<BookSummary>, AppError> {
     let rows = sqlx::query(
         r#"
         SELECT
             b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.folder_tag,
             b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
@@ -85,31 +121,57 @@ async fn list_books(
         WHERE
             (?1 IS NULL OR b.title LIKE ?1)
             AND (?2 IS NULL OR b.rating >= ?2)
+            AND (?3 IS NULL OR b.folder_tag = ?3)
             AND (
-                ?3 IS NULL
-                OR (?3 = 'unread' AND p.book_id IS NULL)
-                OR (?3 = 'reading' AND p.book_id IS NOT NULL AND p.percent < 1.0)
-                OR (?3 = 'finished' AND p.percent >= 1.0)
+                ?4 IS NULL
+                OR (?4 = 'unread' AND p.book_id IS NULL)
+                OR (?4 = 'reading' AND p.book_id IS NOT NULL AND p.percent < 1.0)
+                OR (?4 = 'finished' AND p.percent >= 1.0)
             )
         ORDER BY
-            CASE WHEN ?4 = 'title' THEN b.title END COLLATE NOCASE ASC,
-            CASE WHEN ?4 = 'progress' THEN COALESCE(p.percent, 0.0) END DESC,
-            CASE WHEN ?4 = 'rating' THEN COALESCE(b.rating, 0) END DESC,
-            CASE WHEN ?4 = 'recent' THEN COALESCE(p.updated_at, b.updated_at) END DESC,
+            CASE WHEN ?5 = 'title' THEN b.title END COLLATE NOCASE ASC,
+            CASE WHEN ?5 = 'progress' THEN COALESCE(p.percent, 0.0) END DESC,
+            CASE WHEN ?5 = 'rating' THEN COALESCE(b.rating, 0) END DESC,
+            CASE WHEN ?5 = 'recent' THEN COALESCE(p.updated_at, b.updated_at) END DESC,
             b.title COLLATE NOCASE ASC
         "#,
     )
     .bind(search)
     .bind(min_rating)
+    .bind(folder_tag)
     .bind(status)
     .bind(sort)
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await?;
 
     let books = rows
         .into_iter()
         .map(book_from_row)
         .collect::<Result<_, _>>()?;
+    Ok(books)
+}
+
+async fn list_books(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BookListQuery>,
+) -> Result<Json<Vec<BookSummary>>, AppError> {
+    let search = query
+        .search
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{value}%"));
+    let status_str = normalize_status(query.status)?;
+    let status = status_str.as_deref();
+    let sort_str = normalize_sort(query.sort)?;
+    let sort = sort_str.as_str();
+    let min_rating = normalize_min_rating(query.min_rating)?;
+    let folder_tag = query
+        .folder_tag
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+
+    let books = list_books_internal(&state.db, search, min_rating, status, sort, folder_tag).await?;
     Ok(Json(books))
 }
 
@@ -125,6 +187,7 @@ async fn fetch_book_summary(db: &SqlitePool, id: i64) -> Result<BookSummary, App
         r#"
         SELECT
             b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.folder_tag,
             b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
@@ -299,6 +362,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
         encoding: row.try_get("encoding")?,
+        folder_tag: row.try_get("folder_tag")?,
         rating: row.try_get("rating")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -430,6 +494,7 @@ mod tests {
                 search: None,
                 status: None,
                 min_rating: Some(4),
+                folder_tag: None,
                 sort: Some("rating".to_string()),
             }),
         )
@@ -449,6 +514,7 @@ mod tests {
                 search: None,
                 status: Some("reading".to_string()),
                 min_rating: None,
+                folder_tag: None,
                 sort: Some("title".to_string()),
             }),
         )
@@ -469,6 +535,7 @@ mod tests {
                 search: None,
                 status: Some("unread".to_string()),
                 min_rating: None,
+                folder_tag: None,
                 sort: Some("title".to_string()),
             }),
         )

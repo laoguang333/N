@@ -198,6 +198,7 @@ h1 {
 
 .book-row:focus-visible,
 .icon-button:focus-visible,
+.folder-row:focus-visible,
 .star-button:focus-visible,
 .theme-row button:focus-visible,
 .filter-bar select:focus-visible {
@@ -234,6 +235,29 @@ h1 {
   display: grid;
   justify-items: end;
   gap: 8px;
+}
+
+.folder-row .book-main strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.folder-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-title .icon-button {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
 }
 
 .rating-row {
