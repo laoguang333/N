@@ -79,9 +79,21 @@ async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>
         if books.len() == 1 {
             root_books.push(books.into_iter().next().unwrap());
         } else {
+            let max_rating = books.iter().filter_map(|b| b.rating).max();
+            let latest_activity = books
+                .iter()
+                .filter_map(|b| {
+                    b.progress
+                        .as_ref()
+                        .map(|p| p.updated_at.clone())
+                        .or_else(|| Some(b.updated_at.clone()))
+                })
+                .max();
             folders.push(FolderSummary {
                 name: tag,
                 book_count: books.len(),
+                max_rating,
+                latest_activity,
             });
         }
     }
@@ -623,6 +635,29 @@ mod tests {
         fixture.cleanup().await;
     }
 
+    #[tokio::test]
+    async fn shelf_groups_books_and_collapses_single_book_folders() {
+        let fixture = TestFixture::new("shelf-groups").await;
+        fixture.insert_book("Root", -1.0, None).await;
+        fixture.insert_tagged_book("Multi1", -1.0, "Author").await;
+        fixture.insert_tagged_book("Multi2", -1.0, "Author").await;
+        fixture.insert_tagged_book("Single", -1.0, "Loner").await;
+
+        let Json(resp) = shelf(State(fixture.state.clone())).await.unwrap();
+
+        assert_eq!(resp.books.len(), 2, "Root and single-folder books should be in root");
+        let mut titles: Vec<String> = resp.books.iter().map(|b| b.title.clone()).collect();
+        titles.sort();
+        assert!(titles.contains(&"Root".to_string()));
+        assert!(titles.contains(&"Single".to_string()), "Single-book folder should collapse to root");
+
+        assert_eq!(resp.folders.len(), 1, "Multi-book folder should appear");
+        assert_eq!(resp.folders[0].name, "Author");
+        assert_eq!(resp.folders[0].book_count, 2);
+
+        fixture.cleanup().await;
+    }
+
     struct TestFixture {
         root: std::path::PathBuf,
         state: Arc<AppState>,
@@ -664,6 +699,39 @@ mod tests {
             .bind(file_path.to_string_lossy().to_string())
             .bind(format!("hash-{title}"))
             .bind(rating)
+            .fetch_one(&self.state.db)
+            .await
+            .unwrap();
+
+            if percent >= 0.0 {
+                sqlx::query(
+                    "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 10, ?2)",
+                )
+                .bind(id)
+                .bind(percent)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+            }
+
+            id
+        }
+
+        async fn insert_tagged_book(&self, title: &str, percent: f64, folder_tag: &str) -> i64 {
+            let file_path = self.root.join(format!("{folder_tag}/{title}.txt"));
+            std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+            std::fs::write(&file_path, title).unwrap();
+            let id: i64 = sqlx::query_scalar(
+                r#"
+                INSERT INTO books (title, file_path, file_hash, size, mtime, encoding, rating, folder_tag)
+                VALUES (?1, ?2, ?3, 10, 1, 'UTF-8', NULL, ?4)
+                RETURNING id
+                "#,
+            )
+            .bind(title)
+            .bind(file_path.to_string_lossy().to_string())
+            .bind(format!("hash-{title}"))
+            .bind(folder_tag)
             .fetch_one(&self.state.db)
             .await
             .unwrap();

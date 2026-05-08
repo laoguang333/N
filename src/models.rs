@@ -77,6 +77,8 @@ pub struct ShelfResponse {
 pub struct FolderSummary {
     pub name: String,
     pub book_count: usize,
+    pub max_rating: Option<i64>,
+    pub latest_activity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

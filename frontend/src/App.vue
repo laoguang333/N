@@ -21,7 +21,6 @@ import {
   getProgress,
   getPublicConfig,
   getShelf,
-  listBooks,
   saveProgress,
   saveProgressBeacon,
   saveProgressKeepalive,
@@ -37,6 +36,7 @@ import {
 import { buildParagraphs, buildParagraphOffsetMap, findParagraphIndex, formatPercent, formatSize, parseSettings } from "./reader";
 import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 import AutoScroll from "./AutoScroll.vue";
+import FolderOverlay from "./FolderOverlay.vue";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -212,25 +212,37 @@ function progressMeta(source, options = {}) {
 }
 
 function parseHash() {
-  const match = window.location.hash.match(/^#\/reader\/(\d+)/);
-  if (match) {
-    const nextBookId = Number(match[1]);
+  const readerMatch = window.location.hash.match(/^#\/reader\/(\d+)/);
+  if (readerMatch) {
+    const nextBookId = Number(readerMatch[1]);
     if (route.name === "reader" && route.bookId && route.bookId !== nextBookId) {
       saveProgressInBackground("route_change", { reuseCurrent: true });
     }
     route.name = "reader";
     route.bookId = nextBookId;
-  } else {
-    const shouldRestoreShelf = route.name === "reader";
-    if (shouldRestoreShelf) {
-      saveProgressInBackground("route_change", { reuseCurrent: true });
-    }
-    route.name = "shelf";
+    shelf.folderTag = null;
+    return;
+  }
+
+  const tabMatch = window.location.hash.match(/^#\/a$/);
+  if (tabMatch) {
+    shelf.folderTag = null;
+    route.name = "tab-a";
     route.bookId = null;
     reader.settingsOpen = false;
-    if (shouldRestoreShelf) {
-      nextTick(restoreShelfScroll);
-    }
+    return;
+  }
+
+  const shouldRestoreShelf = route.name === "reader";
+  if (shouldRestoreShelf) {
+    saveProgressInBackground("route_change", { reuseCurrent: true });
+  }
+  route.name = "shelf";
+  route.bookId = null;
+  reader.settingsOpen = false;
+  shelf.folderTag = null;
+  if (shouldRestoreShelf) {
+    nextTick(restoreShelfScroll);
   }
 }
 
@@ -246,24 +258,10 @@ async function loadBooks() {
   shelf.loading = true;
   shelf.error = "";
   try {
-    if (shelf.folderTag) {
-      const books = applyCachedProgress(
-        await listBooks({
-          search: shelf.search,
-          status: "all",
-          minRating: shelf.minRating,
-          sort: shelf.sort,
-          folderTag: shelf.folderTag,
-        }),
-      );
-      shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
-      shelf.folders = [];
-    } else {
-      const data = await getShelf();
-      const books = applyCachedProgress(data.books);
-      shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
-      shelf.folders = data.folders;
-    }
+    const data = await getShelf();
+    const books = applyCachedProgress(data.books);
+    shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
+    shelf.folders = data.folders;
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -272,6 +270,7 @@ async function loadBooks() {
 }
 
 async function runScan() {
+  if (shelf.scanning) return;
   shelf.scanning = true;
   shelf.error = "";
   shelf.scanMessage = "";
@@ -812,6 +811,11 @@ async function goShelf() {
   window.location.hash = "#/";
 }
 
+function switchTab(name) {
+  shelf.folderTag = null;
+  window.location.hash = name === "a" ? "#/a" : "#/";
+}
+
 function openReader(bookId) {
   markShelfScroll();
   window.location.hash = `#/reader/${bookId}`;
@@ -819,14 +823,15 @@ function openReader(bookId) {
 
 function openFolder(tag) {
   shelf.folderTag = tag;
-  shelf.search = "";
-  window.location.hash = "#/";
 }
 
 function goShelfRoot() {
   shelf.folderTag = null;
-  shelf.search = "";
-  window.location.hash = "#/";
+}
+
+function onFolderOpenBook(bookId) {
+  shelf.folderTag = null;
+  openReader(bookId);
 }
 
 function openReaderByKeyboard(event, bookId) {
@@ -861,13 +866,7 @@ async function updateRating(book, rating) {
       <header class="shelf-header">
         <div>
           <p class="eyebrow">TXT Reader</p>
-          <h1 v-if="shelf.folderTag" class="folder-title">
-            <button class="icon-button" type="button" @click="goShelfRoot" title="返回书架">
-              <ArrowLeft :size="18" />
-            </button>
-            {{ shelf.folderTag }}
-          </h1>
-          <h1 v-else>书架</h1>
+          <h1>书架</h1>
         </div>
         <button class="icon-button" type="button" :disabled="shelf.scanning" @click="runScan" title="扫描书库">
           <LoaderCircle v-if="shelf.scanning" class="spin" :size="22" />
@@ -912,7 +911,7 @@ async function updateRating(book, rating) {
 
       <div v-else-if="shelf.books.length === 0 && shelf.folders.length === 0" class="empty-state">
         <BookOpen :size="34" />
-        <p>{{ shelf.folderTag ? '此文件夹没有小说' : '暂无小说' }}</p>
+        <p>暂无小说</p>
         <span>书库目录：{{ libraryHint }}</span>
       </div>
 
@@ -930,7 +929,21 @@ async function updateRating(book, rating) {
             <strong><FolderClosed :size="18" class="folder-icon" /> {{ folder.name }}</strong>
             <span>{{ folder.book_count }} 本</span>
           </span>
-          <span class="book-side" />
+          <span class="book-side">
+            <span class="rating-row" @click.stop @keydown.stop>
+              <button
+                v-for="rating in 5"
+                :key="rating"
+                class="star-button"
+                :class="{ active: (folder.max_rating || 0) >= rating }"
+                type="button"
+                disabled
+                :title="folder.max_rating ? `最高评分 ${folder.max_rating} 星` : '未评分'"
+              >
+                <Star :size="17" />
+              </button>
+            </span>
+          </span>
         </article>
 
         <article
@@ -964,6 +977,26 @@ async function updateRating(book, rating) {
             </span>
           </span>
         </article>
+      </div>
+
+      <FolderOverlay
+        :tag="shelf.folderTag"
+        @close="goShelfRoot"
+        @open="onFolderOpenBook"
+      />
+    </section>
+
+    <section v-else-if="route.name === 'tab-a'" class="tab-a-view">
+      <header class="shelf-header">
+        <div>
+          <p class="eyebrow">TXT Reader</p>
+          <h1>A</h1>
+        </div>
+      </header>
+      <div class="empty-state">
+        <BookOpen :size="34" />
+        <p>A 页面</p>
+        <span>内容正在建设中</span>
       </div>
     </section>
 
@@ -1150,5 +1183,24 @@ async function updateRating(book, rating) {
         </div>
       </aside>
     </section>
+
+    <nav v-if="route.name !== 'reader'" class="tab-bar">
+      <button
+        type="button"
+        class="tab-button"
+        :class="{ active: route.name === 'shelf' }"
+        @click="switchTab('n')"
+      >
+        N
+      </button>
+      <button
+        type="button"
+        class="tab-button"
+        :class="{ active: route.name === 'tab-a' }"
+        @click="switchTab('a')"
+      >
+        A
+      </button>
+    </nav>
   </main>
 </template>
