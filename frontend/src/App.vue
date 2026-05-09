@@ -116,6 +116,19 @@ const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "no
 const readerProgressValue = computed(() => Math.round(reader.visiblePercent * 1000));
 const readerProgressLabel = computed(() => `${Math.round(reader.visiblePercent * 100)}%`);
 
+const shelfItems = computed(() => {
+  const folders = shelf.folders.map((f) => ({ type: "folder", name: f.name, bookCount: f.book_count, sortKey: f.name }));
+  const books = shelf.books.map((b) => ({ type: "book", ...b, sortKey: b.title }));
+
+  if (shelf.sort === "title") {
+    return [...folders, ...books].sort((a, b) =>
+      a.sortKey.localeCompare(b.sortKey, "zh-Hans", { sensitivity: "base" })
+    );
+  }
+
+  return [...folders, ...books];
+});
+
 watch(
   () => ({ ...settings }),
   () => {
@@ -909,74 +922,60 @@ async function updateRating(book, rating) {
         <LoaderCircle class="spin" :size="28" />
       </div>
 
-      <div v-else-if="shelf.books.length === 0 && shelf.folders.length === 0" class="empty-state">
+      <div v-else-if="shelfItems.length === 0" class="empty-state">
         <BookOpen :size="34" />
         <p>暂无小说</p>
         <span>书库目录：{{ libraryHint }}</span>
       </div>
 
       <div v-else class="book-list">
-        <article
-          v-for="folder in shelf.folders"
-          :key="folder.name"
-          class="book-row folder-row"
-          role="button"
-          tabindex="0"
-          @click="openFolder(folder.name)"
-          @keydown="(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFolder(folder.name) } }"
-        >
-          <span class="book-main">
-            <strong><FolderClosed :size="18" class="folder-icon" /> {{ folder.name }}</strong>
-            <span>{{ folder.book_count }} 本</span>
-          </span>
-          <span class="book-side">
-            <span class="rating-row" @click.stop @keydown.stop>
-              <button
-                v-for="rating in 5"
-                :key="rating"
-                class="star-button"
-                :class="{ active: (folder.max_rating || 0) >= rating }"
-                type="button"
-                disabled
-                :title="folder.max_rating ? `最高评分 ${folder.max_rating} 星` : '未评分'"
-              >
-                <Star :size="17" />
-              </button>
+        <template v-for="item in shelfItems" :key="item.type === 'folder' ? `f-${item.name}` : `b-${item.id}`">
+          <article
+            v-if="item.type === 'folder'"
+            class="book-row folder-row"
+            role="button"
+            tabindex="0"
+            @click="openFolder(item.name)"
+            @keydown="(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFolder(item.name) } }"
+          >
+            <span class="book-main">
+              <strong><FolderClosed :size="18" class="folder-icon" /> {{ item.name }}</strong>
+              <span>{{ item.bookCount }} 本</span>
             </span>
-          </span>
-        </article>
+            <span class="book-side" />
+          </article>
 
-        <article
-          v-for="book in shelf.books"
-          :key="book.id"
-          class="book-row"
-          role="button"
-          tabindex="0"
-          @click="openReader(book.id)"
-          @keydown="openReaderByKeyboard($event, book.id)"
-        >
-          <span class="book-main">
-            <strong>{{ book.title }}</strong>
-            <span>{{ formatSize(book.size) }} · {{ book.encoding }}</span>
-          </span>
-          <span class="book-side">
-            <span class="book-progress">{{ formatPercent(book.progress) }}</span>
-            <span class="rating-row" @click.stop @keydown.stop>
-              <button
-                v-for="rating in 5"
-                :key="rating"
-                class="star-button"
-                :class="{ active: (book.rating || 0) >= rating }"
-                type="button"
-                :disabled="shelf.ratingBookId === book.id"
-                :title="book.rating === rating ? '清除评分' : `${rating} 星`"
-                @click="updateRating(book, rating)"
-              >
-                <Star :size="17" />
-              </button>
+          <article
+            v-else
+            class="book-row"
+            role="button"
+            tabindex="0"
+            @click="openReader(item.id)"
+            @keydown="openReaderByKeyboard($event, item.id)"
+          >
+            <span class="book-main">
+              <strong>{{ item.title }}</strong>
+              <span>{{ formatSize(item.size) }} · {{ item.encoding }}</span>
             </span>
-          </span>
-        </article>
+            <span class="book-side">
+              <span class="book-progress">{{ formatPercent(item.progress) }}</span>
+              <span class="rating-row" @click.stop @keydown.stop>
+                <button
+                  v-for="rating in 5"
+                  :key="rating"
+                  class="star-button"
+                  :class="{ active: (item.rating || 0) >= rating }"
+                  type="button"
+                  :disabled="shelf.ratingBookId === item.id"
+                  :title="item.rating === rating ? '清除评分' : `${rating} 星`"
+                  @click="updateRating(item, rating)"
+                >
+                  <Star :size="17" />
+                </button>
+              </span>
+            </span>
+          </article>
+        </template>
       </div>
 
       <FolderOverlay

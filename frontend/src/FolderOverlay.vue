@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { LoaderCircle, X } from 'lucide-vue-next'
-import { listBooks } from './api'
+import { LoaderCircle, Star, X } from 'lucide-vue-next'
+import { listBooks, saveRating } from './api'
 import { formatPercent } from './reader'
 
 const props = defineProps({
@@ -14,6 +14,7 @@ const books = ref([])
 const loading = ref(false)
 const error = ref('')
 const currentPage = ref(0)
+const ratingBookId = ref(null)
 const ITEMS_PER_PAGE = 9
 
 const totalPages = computed(() => Math.max(1, Math.ceil(books.value.length / ITEMS_PER_PAGE)))
@@ -38,6 +39,22 @@ async function load() {
     error.value = e.message
   } finally {
     loading.value = false
+  }
+}
+
+async function updateRating(book, rating) {
+  const nextRating = book.rating === rating ? null : rating
+  ratingBookId.value = book.id
+  try {
+    const updated = await saveRating(book.id, nextRating)
+    const index = books.value.findIndex((item) => item.id === book.id)
+    if (index !== -1) {
+      books.value[index] = updated
+    }
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    ratingBookId.value = null
   }
 }
 
@@ -91,6 +108,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
             >
               <strong class="folder-book-title">{{ book.title }}</strong>
               <span class="folder-book-progress">{{ formatPercent(book.progress) }}</span>
+              <span class="folder-book-rating" @click.stop @keydown.stop>
+                <button
+                  v-for="r in 5"
+                  :key="r"
+                  class="folder-star-button"
+                  :class="{ active: (book.rating || 0) >= r }"
+                  type="button"
+                  :disabled="ratingBookId === book.id"
+                  :title="book.rating === r ? '清除评分' : `${r} 星`"
+                  @click="updateRating(book, r)"
+                >
+                  <Star :size="12" />
+                </button>
+              </span>
             </article>
           </div>
 

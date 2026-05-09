@@ -127,8 +127,7 @@ h1 {
   background: var(--surface-strong);
 }
 
-.search-row input,
-.filter-bar select {
+.search-row input {
   width: 100%;
   border: 0;
   outline: 0;
@@ -144,10 +143,12 @@ h1 {
 }
 
 .filter-bar select {
+  width: 100%;
   min-height: 42px;
   padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
+  color: var(--text);
   background: var(--surface-strong);
 }
 
@@ -785,9 +786,9 @@ h1 {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-height: 88px;
-  padding: 12px 8px;
+  gap: 4px;
+  min-height: 106px;
+  padding: 10px 8px;
   border: 1px solid var(--line);
   border-radius: 12px;
   text-align: center;
@@ -818,6 +819,40 @@ h1 {
 .folder-book-progress {
   font-size: 12px;
   color: var(--muted);
+}
+
+.folder-book-rating {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.folder-star-button {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.folder-star-button svg {
+  fill: transparent;
+}
+
+.folder-star-button.active {
+  color: #b7791f;
+}
+
+.folder-star-button.active svg {
+  fill: currentColor;
+}
+
+.folder-star-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .folder-dots {
