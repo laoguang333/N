@@ -5,6 +5,7 @@ import { Play } from "lucide-vue-next";
 const props = defineProps({
   playing: { type: Boolean, default: false },
   speed: { type: Number, default: 5 },
+  scrollElement: { type: Object, default: null },
 });
 const emit = defineEmits(["update:playing", "update:speed"]);
 
@@ -108,7 +109,7 @@ function onDialPointerUp() {
 }
 
 function getScrollElement() {
-  return document.querySelector(".reader-content");
+  return props.scrollElement || document.querySelector(".reader-content");
 }
 
 function tickRaf(now) {

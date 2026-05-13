@@ -108,7 +108,8 @@ const virtualizer = useVirtualizer({
   get count() { return reader.paragraphs.length; },
   getScrollElement: () => readerRoot.value,
   estimateSize: () => 80,
-  overscan: 30,
+  overscan: 12,
+  useAnimationFrameWithResizeObserver: true,
 });
 
 const themeClass = computed(() => `theme-${settings.theme}`);
@@ -139,9 +140,7 @@ watch(
 watch(
   () => [settings.fontSize, settings.lineHeight, settings.paragraphSpacing],
   () => {
-    nextTick(() => {
-      virtualizer.value.measure();
-    });
+    scheduleVirtualMeasure();
   },
 );
 
@@ -373,6 +372,15 @@ function afterNextPaint() {
   });
 }
 
+function scheduleVirtualMeasure() {
+  nextTick(() => {
+    window.requestAnimationFrame(() => {
+      virtualizer.value.measure();
+      updateVisibleProgress();
+    });
+  });
+}
+
 function applyCachedProgress(books) {
   const cache = progressCache();
   return books.map((book) => ({
@@ -571,9 +579,17 @@ function snapshotProgress(options = {}) {
     return reader.progress;
   }
 
-  const progress = cacheProgress(reader.book.book_id, payload, {
-    dirty: options.dirty ?? true,
-  });
+  const progress = options.persistLocal === false
+    ? normalizeProgress(reader.book.book_id, payload, {
+      dirty: options.dirty ?? true,
+      updated_at: new Date().toISOString(),
+    })
+    : cacheProgress(reader.book.book_id, payload, {
+      dirty: options.dirty ?? true,
+    });
+  if (!progress) {
+    return reader.progress;
+  }
   reader.progress = progress;
   reader.visiblePercent = progress.percent;
   updateShelfBookProgress(progress);
@@ -654,7 +670,7 @@ function onReaderScroll() {
   if (progressFrame === null) {
     progressFrame = window.requestAnimationFrame(() => {
       progressFrame = null;
-      snapshotProgress({ source: "scroll" });
+      snapshotProgress({ source: "scroll", persistLocal: false });
     });
   }
   window.clearTimeout(scrollTimer);
@@ -1131,6 +1147,7 @@ async function updateRating(book, rating) {
       <AutoScroll
         v-model:playing="reader.autoScrollPlaying"
         v-model:speed="reader.autoScrollSpeed"
+        :scroll-element="readerRoot"
       />
 
       <aside v-if="reader.settingsOpen" class="settings-panel">
