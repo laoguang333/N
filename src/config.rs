@@ -1,7 +1,9 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+
+use crate::app_paths::{app_data_dir, config_path};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -18,15 +20,26 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let app_data = app_data_dir();
         Self {
             listen: "0.0.0.0:234".to_string(),
-            database_path: "data/reader.sqlite".to_string(),
-            library_dirs: vec!["novels".to_string()],
+            database_path: app_data.join("reader.sqlite").to_string_lossy().to_string(),
+            library_dirs: vec![app_data.join("novels").to_string_lossy().to_string()],
             scan_recursive: false,
             scan_on_startup: false,
             cors_allowed_origins: None,
-            tls_cert_path: None,
-            tls_key_path: None,
+            tls_cert_path: Some(
+                app_data
+                    .join("server-cert.pem")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            tls_key_path: Some(
+                app_data
+                    .join("server-key.pem")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
         }
     }
 }
@@ -35,7 +48,16 @@ impl Config {
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
-            return Ok(Self::default());
+            let config = Self::default();
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+            }
+            let raw =
+                toml::to_string_pretty(&config).context("failed to serialize default config")?;
+            fs::write(path, raw)
+                .with_context(|| format!("failed to write config file {}", path.display()))?;
+            return Ok(config);
         }
 
         let raw = fs::read_to_string(path)
@@ -43,6 +65,10 @@ impl Config {
         let config = toml::from_str(&raw)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
         Ok(config)
+    }
+
+    pub fn config_path() -> PathBuf {
+        config_path()
     }
 }
 
@@ -61,13 +87,28 @@ mod tests {
         let config = Config::load(&path).unwrap();
 
         assert_eq!(config.listen, "0.0.0.0:234");
-        assert_eq!(config.database_path, "data/reader.sqlite");
-        assert_eq!(config.library_dirs, vec!["novels"]);
+        assert!(config.database_path.ends_with(r"TXT Reader\reader.sqlite"));
+        assert!(
+            config
+                .library_dirs
+                .iter()
+                .all(|path| path.contains(r"TXT Reader\novels"))
+        );
         assert!(!config.scan_recursive);
         assert!(!config.scan_on_startup);
         assert!(config.cors_allowed_origins.is_none());
-        assert!(config.tls_cert_path.is_none());
-        assert!(config.tls_key_path.is_none());
+        assert!(
+            config
+                .tls_cert_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(r"TXT Reader\server-cert.pem"))
+        );
+        assert!(
+            config
+                .tls_key_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(r"TXT Reader\server-key.pem"))
+        );
     }
 
     #[test]
@@ -85,7 +126,7 @@ library_dirs = ["books"]
         let config = Config::load(&path).unwrap();
 
         assert_eq!(config.listen, "127.0.0.1:4000");
-        assert_eq!(config.database_path, "data/reader.sqlite");
+        assert!(config.database_path.ends_with(r"TXT Reader\reader.sqlite"));
         assert_eq!(config.library_dirs, vec!["books"]);
         assert!(!config.scan_recursive);
         assert!(!config.scan_on_startup);

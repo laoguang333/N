@@ -61,7 +61,11 @@ async fn shelf(
     State(state): State<Arc<AppState>>,
     Query(query): Query<BookListQuery>,
 ) -> Result<Json<ShelfResponse>, AppError> {
-    let search = query.search.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let status_str = normalize_status(query.status)?;
     let status = status_str.as_deref();
     let sort_str = normalize_sort(query.sort)?;

@@ -1,5 +1,11 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod api;
 mod app_error;
+mod app_paths;
 mod config;
 mod db;
 mod library;
@@ -17,6 +23,7 @@ use std::{
 
 use anyhow::Context;
 use api::router;
+use app_paths::config_path;
 use axum::{
     extract::Request,
     http::{HeaderValue, header},
@@ -52,7 +59,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let config = Config::load("config.toml")?;
+    let config = Config::load(config_path())?;
 
     #[cfg(target_os = "windows")]
     {
