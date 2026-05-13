@@ -62,7 +62,7 @@ const shelf = reactive({
   error: "",
   scanMessage: "",
   folderTag: null,
-  folders: [],
+  items: [],
 });
 
 const reader = reactive({
@@ -117,16 +117,7 @@ const readerProgressValue = computed(() => Math.round(reader.visiblePercent * 10
 const readerProgressLabel = computed(() => `${Math.round(reader.visiblePercent * 100)}%`);
 
 const shelfItems = computed(() => {
-  const folders = shelf.folders.map((f) => ({ type: "folder", name: f.name, bookCount: f.book_count, sortKey: f.name }));
-  const books = shelf.books.map((b) => ({ type: "book", ...b, sortKey: b.title }));
-
-  if (shelf.sort === "title") {
-    return [...folders, ...books].sort((a, b) =>
-      a.sortKey.localeCompare(b.sortKey, "zh-Hans", { sensitivity: "base" })
-    );
-  }
-
-  return [...folders, ...books];
+  return shelf.items;
 });
 
 watch(
@@ -271,10 +262,13 @@ async function loadBooks() {
   shelf.loading = true;
   shelf.error = "";
   try {
-    const data = await getShelf();
-    const books = applyCachedProgress(data.books);
-    shelf.books = books.filter((book) => matchesShelfStatus(book, shelf.status));
-    shelf.folders = data.folders;
+    const data = await getShelf({
+      search: shelf.search,
+      status: shelf.status,
+      minRating: shelf.minRating,
+      sort: shelf.sort,
+    });
+    shelf.items = normalizeShelfItems(data);
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -385,6 +379,32 @@ function applyCachedProgress(books) {
     ...book,
     progress: normalizeProgress(book.id, cache[book.id]) || normalizeProgress(book.id, book.progress),
   }));
+}
+
+function normalizeShelfItems(data) {
+  if (Array.isArray(data.items)) {
+    return data.items.map((item) => {
+      if (item.type === "book" && item.book) {
+        const [book] = applyCachedProgress([item.book]);
+        return { type: "book", ...book };
+      }
+      if (item.type === "folder" && item.folder) {
+        return {
+          type: "folder",
+          name: item.folder.name,
+          bookCount: item.folder.book_count,
+          maxRating: item.folder.max_rating,
+          maxProgress: item.folder.max_progress,
+          latestActivity: item.folder.latest_activity,
+        };
+      }
+      return item;
+    });
+  }
+
+  const folders = (data.folders || []).map((f) => ({ type: "folder", name: f.name, bookCount: f.book_count }));
+  const books = applyCachedProgress(data.books || []).map((b) => ({ type: "book", ...b }));
+  return [...folders, ...books];
 }
 
 function matchesShelfStatus(book, status) {
@@ -510,10 +530,10 @@ function cacheProgress(bookId, progress, options = {}) {
 }
 
 function updateShelfBookProgress(progress) {
-  const index = shelf.books.findIndex((book) => book.id === progress.book_id);
+  const index = shelf.items.findIndex((item) => item.type === "book" && item.id === progress.book_id);
   if (index !== -1) {
-    shelf.books[index] = {
-      ...shelf.books[index],
+    shelf.items[index] = {
+      ...shelf.items[index],
       progress,
     };
   }
@@ -861,9 +881,9 @@ async function updateRating(book, rating) {
 
   try {
     const updated = await saveRating(book.id, nextRating);
-    const index = shelf.books.findIndex((item) => item.id === book.id);
+    const index = shelf.items.findIndex((item) => item.type === "book" && item.id === book.id);
     if (index !== -1) {
-      shelf.books[index] = updated;
+      shelf.items[index] = { type: "book", ...updated };
     }
   } catch (error) {
     shelf.error = error.message;
@@ -980,6 +1000,10 @@ async function updateRating(book, rating) {
 
       <FolderOverlay
         :tag="shelf.folderTag"
+        :search="shelf.search"
+        :status="shelf.status"
+        :min-rating="shelf.minRating"
+        :sort="shelf.sort"
         @close="goShelfRoot"
         @open="onFolderOpenBook"
       />

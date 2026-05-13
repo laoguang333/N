@@ -1,5 +1,5 @@
 function normalizeText(text) {
-  return String(text).replace(/\s+/g, " ").trim().toLowerCase();
+  return String(text).toLowerCase();
 }
 
 export function buildSearchIndex(paragraphs) {

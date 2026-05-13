@@ -14,24 +14,28 @@ test("opens a mocked book in the browser", async ({ page }) => {
     });
   });
 
-  await page.route("**/api/books", async (route) => {
+  await page.route("**/api/shelf", async (route) => {
+    const book = {
+      id: 1,
+      title: "Fixture Book",
+      file_path: "fixture-library/fixture-book.txt",
+      file_hash: "fixture-hash",
+      size: 2048,
+      mtime: 1,
+      encoding: "UTF-8",
+      folder_tag: null,
+      rating: null,
+      created_at: "2026-04-30T00:00:00.000Z",
+      updated_at: "2026-04-30T00:00:00.000Z",
+      progress: null,
+    };
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify([
-        {
-          id: 1,
-          title: "Fixture Book",
-          file_path: "fixture-library/fixture-book.txt",
-          file_hash: "fixture-hash",
-          size: 2048,
-          mtime: 1,
-          encoding: "UTF-8",
-          rating: null,
-          created_at: "2026-04-30T00:00:00.000Z",
-          updated_at: "2026-04-30T00:00:00.000Z",
-          progress: null,
-        },
-      ]),
+      body: JSON.stringify({
+        items: [{ type: "book", book }],
+        books: [book],
+        folders: [],
+      }),
     });
   });
 

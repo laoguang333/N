@@ -6,6 +6,22 @@ import { formatPercent } from './reader'
 
 const props = defineProps({
   tag: String,
+  search: {
+    type: String,
+    default: '',
+  },
+  status: {
+    type: String,
+    default: 'all',
+  },
+  minRating: {
+    type: [String, Number],
+    default: '',
+  },
+  sort: {
+    type: String,
+    default: 'title',
+  },
 })
 
 const emit = defineEmits(['close', 'open'])
@@ -24,6 +40,12 @@ const pageBooks = computed(() => {
   return books.value.slice(start, start + ITEMS_PER_PAGE)
 })
 
+const effectiveSearch = computed(() => {
+  const query = String(props.search || '').trim().toLowerCase()
+  if (!query) return ''
+  return String(props.tag || '').toLowerCase().includes(query) ? '' : props.search
+})
+
 function goPage(page) {
   currentPage.value = page
 }
@@ -33,7 +55,13 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    books.value = await listBooks({ folderTag: props.tag, sort: 'title' })
+    books.value = await listBooks({
+      folderTag: props.tag,
+      search: effectiveSearch.value,
+      status: props.status,
+      minRating: props.minRating,
+      sort: props.sort || 'title',
+    })
     currentPage.value = 0
   } catch (e) {
     error.value = e.message
@@ -58,7 +86,11 @@ async function updateRating(book, rating) {
   }
 }
 
-watch(() => props.tag, () => { if (props.tag) load() }, { immediate: true })
+watch(
+  () => [props.tag, props.search, props.status, props.minRating, props.sort],
+  () => { if (props.tag) load() },
+  { immediate: true },
+)
 
 function handleKeydown(e) {
   if (e.key === 'Escape') {

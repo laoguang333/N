@@ -18,8 +18,10 @@ async function request(path, options = {}) {
   return response.json();
 }
 
-export function getShelf() {
-  return request("/api/shelf");
+export function getShelf(query = {}) {
+  const params = buildBookQueryParams(query);
+  const suffix = params.toString() ? `?${params}` : "";
+  return request(`/api/shelf${suffix}`);
 }
 
 export function listBooks(search = "") {
@@ -31,6 +33,12 @@ export function listBooks(search = "") {
 }
 
 function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}) {
+  const params = buildBookQueryParams({ search, status, minRating, sort, folderTag });
+  const suffix = params.toString() ? `?${params}` : "";
+  return request(`/api/books${suffix}`);
+}
+
+function buildBookQueryParams({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}) {
   const params = new URLSearchParams();
   if (search.trim()) {
     params.set("search", search.trim());
@@ -47,8 +55,7 @@ function listBooksWithQuery({ search = "", status = "all", minRating = "", sort 
   if (folderTag) {
     params.set("folder_tag", folderTag);
   }
-  const suffix = params.toString() ? `?${params}` : "";
-  return request(`/api/books${suffix}`);
+  return params;
 }
 
 export function getPublicConfig() {

@@ -53,6 +53,7 @@
 - `status`：`all`、`unread`、`reading`、`finished`。
 - `min_rating`：最低评分，`1..5`。
 - `sort`：`recent`、`title`、`progress`、`rating`。
+- `folder_tag`：只返回指定文件夹分组内的小说。
 
 示例：
 
@@ -84,6 +85,50 @@
   }
 ]
 ```
+
+## GET /api/shelf
+
+查询混排书架。支持和 `GET /api/books` 相同的筛选参数：`search`、`status`、`min_rating`、`sort`。
+
+响应：
+
+```json
+{
+  "items": [
+    {
+      "type": "folder",
+      "folder": {
+        "name": "Author",
+        "book_count": 3,
+        "max_rating": 5,
+        "max_progress": 0.8,
+        "latest_activity": "2026-04-29T01:10:00.000Z"
+      }
+    },
+    {
+      "type": "book",
+      "book": {
+        "id": 1,
+        "title": "Book",
+        "file_path": "C:\\books\\Book.txt",
+        "file_hash": "sha256",
+        "size": 1024,
+        "mtime": 1760000000,
+        "encoding": "UTF-8",
+        "folder_tag": null,
+        "rating": 5,
+        "created_at": "2026-04-29T01:00:00.000Z",
+        "updated_at": "2026-04-29T01:00:00.000Z",
+        "progress": null
+      }
+    }
+  ],
+  "books": [],
+  "folders": []
+}
+```
+
+`items` 是前端应使用的混排列表。`books` 和 `folders` 保留用于兼容旧调用。
 
 ## GET /api/books/{id}
 

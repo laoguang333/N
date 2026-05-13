@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { isSuspiciousLocalReset, savePayload } from "./progress";
 import { buildParagraphs, formatPercent, formatSize, parseSettings } from "./reader";
+import { highlightParagraph, searchParagraphs } from "./search";
 
 describe("reader helpers", () => {
   test("buildParagraphs normalizes line endings and tracks offsets", () => {
@@ -88,5 +89,24 @@ describe("reader helpers", () => {
         { allowBackward: true },
       ),
     ).toBe(false);
+  });
+
+  test("search results use original text indexes when whitespace repeats", () => {
+    const paragraphs = [{ offset: 10, text: "Alpha   Beta\tGamma" }];
+    const [result] = searchParagraphs(paragraphs, "beta");
+
+    expect(result).toMatchObject({
+      paragraphOffset: 10,
+      offset: 18,
+      matchStart: 8,
+      matchEnd: 12,
+      text: "Beta",
+    });
+
+    expect(highlightParagraph(paragraphs[0].text, [result])).toEqual([
+      { text: "Alpha   ", highlight: false },
+      { text: "Beta", highlight: true, active: false, id: result.id },
+      { text: "\tGamma", highlight: false },
+    ]);
   });
 });

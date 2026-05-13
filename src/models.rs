@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct BookSummary {
     pub id: i64,
     pub title: String,
@@ -69,16 +69,25 @@ pub struct BookListQuery {
 
 #[derive(Debug, Serialize)]
 pub struct ShelfResponse {
+    pub items: Vec<ShelfItem>,
     pub books: Vec<BookSummary>,
     pub folders: Vec<FolderSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FolderSummary {
     pub name: String,
     pub book_count: usize,
     pub max_rating: Option<i64>,
+    pub max_progress: Option<f64>,
     pub latest_activity: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ShelfItem {
+    Book { book: BookSummary },
+    Folder { folder: FolderSummary },
 }
 
 #[derive(Debug, Serialize)]

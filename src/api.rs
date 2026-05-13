@@ -14,7 +14,7 @@ use crate::{
     library::{read_book_content, require_book_path, scan_library},
     models::{
         BookContent, BookListQuery, BookSummary, FolderSummary, PublicConfig, ReadingProgress,
-        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfResponse,
+        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfItem, ShelfResponse,
     },
 };
 
@@ -57,14 +57,26 @@ async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, Ap
     Ok(Json(result))
 }
 
-async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>, AppError> {
+async fn shelf(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BookListQuery>,
+) -> Result<Json<ShelfResponse>, AppError> {
+    let search = query.search.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let status_str = normalize_status(query.status)?;
+    let status = status_str.as_deref();
+    let sort_str = normalize_sort(query.sort)?;
+    let sort = sort_str.as_str();
+    let min_rating = normalize_min_rating(query.min_rating)?;
     let all_books =
-        list_books_internal(&state.db, None, None, None::<&str>, "title", None::<&str>).await?;
+        list_books_internal(&state.db, None, min_rating, status, sort, None::<&str>).await?;
 
     let mut root_books: Vec<BookSummary> = Vec::new();
     let mut tag_books: BTreeMap<String, Vec<BookSummary>> = BTreeMap::new();
 
     for book in all_books {
+        if !matches_shelf_search(&book, search) {
+            continue;
+        }
         if let Some(ref tag) = book.folder_tag {
             tag_books.entry(tag.clone()).or_default().push(book);
         } else {
@@ -72,42 +84,153 @@ async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>
         }
     }
 
-    let mut folders: Vec<FolderSummary> = Vec::new();
+    let mut items: Vec<ShelfItem> = root_books
+        .into_iter()
+        .map(|book| ShelfItem::Book { book })
+        .collect();
     for (tag, books) in tag_books {
-        if books.len() == 1 {
-            root_books.push(books.into_iter().next().unwrap());
+        let tag_matches = search
+            .map(|search| contains_case_insensitive(&tag, search))
+            .unwrap_or(false);
+        let matching_books: Vec<BookSummary> = if tag_matches {
+            books
         } else {
-            let max_rating = books.iter().filter_map(|b| b.rating).max();
-            let latest_activity = books
-                .iter()
-                .filter_map(|b| {
-                    b.progress
-                        .as_ref()
-                        .map(|p| p.updated_at.clone())
-                        .or_else(|| Some(b.updated_at.clone()))
-                })
-                .max();
-            folders.push(FolderSummary {
-                name: tag,
-                book_count: books.len(),
-                max_rating,
-                latest_activity,
+            books
+                .into_iter()
+                .filter(|book| matches_shelf_search(book, search))
+                .collect()
+        };
+
+        if matching_books.len() == 1 {
+            items.push(ShelfItem::Book {
+                book: matching_books.into_iter().next().unwrap(),
             });
+        } else if !matching_books.is_empty() {
+            let folder = folder_summary(tag, &matching_books);
+            items.push(ShelfItem::Folder { folder });
         }
     }
 
-    root_books.sort_by(|a, b| {
-        a.title
-            .to_lowercase()
-            .cmp(&b.title.to_lowercase())
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    sort_shelf_items(&mut items, sort);
+
+    let mut books = Vec::new();
+    let mut folders = Vec::new();
+    for item in &items {
+        match item {
+            ShelfItem::Book { book } => books.push(book.clone()),
+            ShelfItem::Folder { folder } => folders.push(folder.clone()),
+        }
+    }
 
     Ok(Json(ShelfResponse {
-        books: root_books,
+        items,
+        books,
         folders,
     }))
+}
+
+fn folder_summary(tag: String, books: &[BookSummary]) -> FolderSummary {
+    let max_rating = books.iter().filter_map(|b| b.rating).max();
+    let max_progress = books
+        .iter()
+        .filter_map(|b| b.progress.as_ref().map(|p| p.percent))
+        .max_by(|a, b| a.total_cmp(b));
+    let latest_activity = books
+        .iter()
+        .filter_map(|b| {
+            b.progress
+                .as_ref()
+                .map(|p| p.updated_at.clone())
+                .or_else(|| Some(b.updated_at.clone()))
+        })
+        .max();
+
+    FolderSummary {
+        name: tag,
+        book_count: books.len(),
+        max_rating,
+        max_progress,
+        latest_activity,
+    }
+}
+
+fn sort_shelf_items(items: &mut [ShelfItem], sort: &str) {
+    items.sort_by(|a, b| {
+        let primary = match sort {
+            "progress" => shelf_item_progress(b).total_cmp(&shelf_item_progress(a)),
+            "rating" => shelf_item_rating(b).cmp(&shelf_item_rating(a)),
+            "recent" => shelf_item_activity(b).cmp(&shelf_item_activity(a)),
+            _ => std::cmp::Ordering::Equal,
+        };
+
+        primary
+            .then_with(|| shelf_item_name(a).cmp(&shelf_item_name(b)))
+            .then_with(|| shelf_item_type_order(a).cmp(&shelf_item_type_order(b)))
+            .then_with(|| shelf_item_id(a).cmp(&shelf_item_id(b)))
+    });
+}
+
+fn shelf_item_name(item: &ShelfItem) -> String {
+    match item {
+        ShelfItem::Book { book } => book.title.to_lowercase(),
+        ShelfItem::Folder { folder } => folder.name.to_lowercase(),
+    }
+}
+
+fn shelf_item_type_order(item: &ShelfItem) -> i32 {
+    match item {
+        ShelfItem::Folder { .. } => 0,
+        ShelfItem::Book { .. } => 1,
+    }
+}
+
+fn shelf_item_id(item: &ShelfItem) -> i64 {
+    match item {
+        ShelfItem::Book { book } => book.id,
+        ShelfItem::Folder { .. } => 0,
+    }
+}
+
+fn shelf_item_progress(item: &ShelfItem) -> f64 {
+    match item {
+        ShelfItem::Book { book } => book.progress.as_ref().map(|p| p.percent).unwrap_or(0.0),
+        ShelfItem::Folder { folder } => folder.max_progress.unwrap_or(0.0),
+    }
+}
+
+fn shelf_item_rating(item: &ShelfItem) -> i64 {
+    match item {
+        ShelfItem::Book { book } => book.rating.unwrap_or(0),
+        ShelfItem::Folder { folder } => folder.max_rating.unwrap_or(0),
+    }
+}
+
+fn shelf_item_activity(item: &ShelfItem) -> String {
+    match item {
+        ShelfItem::Book { book } => book
+            .progress
+            .as_ref()
+            .map(|progress| progress.updated_at.clone())
+            .unwrap_or_else(|| book.updated_at.clone()),
+        ShelfItem::Folder { folder } => folder.latest_activity.clone().unwrap_or_default(),
+    }
+}
+
+fn matches_shelf_search(book: &BookSummary, search: Option<&str>) -> bool {
+    let Some(search) = search else {
+        return true;
+    };
+
+    contains_case_insensitive(&book.title, search)
+        || book
+            .folder_tag
+            .as_deref()
+            .map(|tag| contains_case_insensitive(tag, search))
+            .unwrap_or(false)
+}
+
+fn contains_case_insensitive(value: &str, search: &str) -> bool {
+    value.to_lowercase().contains(&search.to_lowercase())
 }
 
 async fn list_books_internal(
@@ -645,7 +768,18 @@ mod tests {
         fixture.insert_tagged_book("Multi2", -1.0, "Author").await;
         fixture.insert_tagged_book("Single", -1.0, "Loner").await;
 
-        let Json(resp) = shelf(State(fixture.state.clone())).await.unwrap();
+        let Json(resp) = shelf(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: None,
+                min_rating: None,
+                folder_tag: None,
+                sort: Some("title".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             resp.books.len(),
@@ -663,6 +797,63 @@ mod tests {
         assert_eq!(resp.folders.len(), 1, "Multi-book folder should appear");
         assert_eq!(resp.folders[0].name, "Author");
         assert_eq!(resp.folders[0].book_count, 2);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn shelf_sorts_folders_and_books_together_by_progress() {
+        let fixture = TestFixture::new("shelf-mixed-sort").await;
+        fixture.insert_book("Root", 0.8, None).await;
+        fixture.insert_tagged_book("Low1", 0.1, "Folder").await;
+        fixture.insert_tagged_book("Low2", 0.2, "Folder").await;
+
+        let Json(resp) = shelf(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: None,
+                min_rating: None,
+                folder_tag: None,
+                sort: Some("progress".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.items.len(), 2);
+        match &resp.items[0] {
+            ShelfItem::Book { book } => assert_eq!(book.title, "Root"),
+            _ => panic!("root book should sort before lower-progress folder"),
+        }
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn shelf_search_collapses_folder_to_single_matching_book() {
+        let fixture = TestFixture::new("shelf-search-collapse").await;
+        fixture.insert_tagged_book("Needle", -1.0, "Folder").await;
+        fixture.insert_tagged_book("Other", -1.0, "Folder").await;
+
+        let Json(resp) = shelf(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: Some("Need".to_string()),
+                status: None,
+                min_rating: None,
+                folder_tag: None,
+                sort: Some("title".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.items.len(), 1);
+        match &resp.items[0] {
+            ShelfItem::Book { book } => assert_eq!(book.title, "Needle"),
+            _ => panic!("single matching folder book should collapse to a book item"),
+        }
 
         fixture.cleanup().await;
     }
