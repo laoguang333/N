@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use tokio::{fs, io::AsyncReadExt, task::JoinSet};
 
-use zhconv::{zhconv, Variant};
+use zhconv::{Variant, zhconv};
 
 use crate::models::ScanResult;
 
@@ -83,10 +83,9 @@ pub async fn scan_library(
             let step = match prepare_scan_file(db, &path, &library_roots).await {
                 Ok(step) => step,
                 Err(error) => {
-                    result.errors.push(format!(
-                        "failed to scan {}: {error:#}",
-                        path.display()
-                    ));
+                    result
+                        .errors
+                        .push(format!("failed to scan {}: {error:#}", path.display()));
                     continue;
                 }
             };
@@ -101,7 +100,7 @@ pub async fn scan_library(
                 }
             }
 
-            if result.scanned % 50 == 0 {
+            if result.scanned.is_multiple_of(50) {
                 tracing::info!(
                     scanned = result.scanned,
                     added = result.added,
@@ -132,10 +131,9 @@ pub async fn scan_library(
                             BookScanOutcome::Added => result.added += 1,
                             BookScanOutcome::Updated => result.updated += 1,
                         },
-                        Err(error) => result.errors.push(format!(
-                            "failed to scan {}: {error:#}",
-                            pf.path.display()
-                        )),
+                        Err(error) => result
+                            .errors
+                            .push(format!("failed to scan {}: {error:#}", pf.path.display())),
                     }
                 }
                 Err(error) => {
@@ -153,8 +151,7 @@ pub async fn scan_library(
         "scan chores complete, removing missing books"
     );
 
-    result.removed =
-        remove_missing_books(db, library_dirs, recursive, &seen_paths).await?;
+    result.removed = remove_missing_books(db, library_dirs, recursive, &seen_paths).await?;
 
     tracing::info!(
         scanned = result.scanned,
@@ -232,9 +229,7 @@ async fn prepare_scan_file(
     }))
 }
 
-async fn read_pending_content(
-    pf: PendingFile,
-) -> anyhow::Result<(PendingFile, FileContent)> {
+async fn read_pending_content(pf: PendingFile) -> anyhow::Result<(PendingFile, FileContent)> {
     let bytes = read_all(&pf.path).await?;
     let content = FileContent {
         file_hash: sha256_hex(&bytes),
@@ -405,10 +400,10 @@ fn compute_folder_tag(file_path: &str, library_roots: &[PathBuf]) -> Option<Stri
     for root in library_roots {
         if let Ok(relative) = path.strip_prefix(root) {
             let mut components = relative.components();
-            if let Some(first) = components.next() {
-                if components.next().is_some() {
-                    return Some(first.as_os_str().to_string_lossy().to_string());
-                }
+            if let Some(first) = components.next()
+                && components.next().is_some()
+            {
+                return Some(first.as_os_str().to_string_lossy().to_string());
             }
             return None;
         }
@@ -673,7 +668,9 @@ mod tests {
         let fixture = TestFixture::new("folder-tag").await;
         let sub = fixture.library.join("Author");
         fs::create_dir_all(&sub).await.unwrap();
-        fs::write(fixture.library.join("RootBook.txt"), "root").await.unwrap();
+        fs::write(fixture.library.join("RootBook.txt"), "root")
+            .await
+            .unwrap();
         fs::write(sub.join("Book1.txt"), "one").await.unwrap();
         fs::write(sub.join("Book2.txt"), "two").await.unwrap();
 
@@ -695,7 +692,11 @@ mod tests {
                 .fetch_one(&fixture.db)
                 .await
                 .unwrap();
-        assert_eq!(tag.as_deref(), Some("Author"), "Book in subdirectory should have folder_tag 'Author'");
+        assert_eq!(
+            tag.as_deref(),
+            Some("Author"),
+            "Book in subdirectory should have folder_tag 'Author'"
+        );
 
         let tag: Option<String> =
             sqlx::query_scalar("SELECT folder_tag FROM books WHERE title = 'Book2'")

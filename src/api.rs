@@ -58,10 +58,8 @@ async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, Ap
 }
 
 async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>, AppError> {
-    let all_books = list_books_internal(
-        &state.db, None, None, None::<&str>, "title", None::<&str>,
-    )
-    .await?;
+    let all_books =
+        list_books_internal(&state.db, None, None, None::<&str>, "title", None::<&str>).await?;
 
     let mut root_books: Vec<BookSummary> = Vec::new();
     let mut tag_books: BTreeMap<String, Vec<BookSummary>> = BTreeMap::new();
@@ -106,7 +104,10 @@ async fn shelf(State(state): State<Arc<AppState>>) -> Result<Json<ShelfResponse>
     });
     folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    Ok(Json(ShelfResponse { books: root_books, folders }))
+    Ok(Json(ShelfResponse {
+        books: root_books,
+        folders,
+    }))
 }
 
 async fn list_books_internal(
@@ -183,7 +184,8 @@ async fn list_books(
         .as_deref()
         .filter(|value| !value.trim().is_empty());
 
-    let books = list_books_internal(&state.db, search, min_rating, status, sort, folder_tag).await?;
+    let books =
+        list_books_internal(&state.db, search, min_rating, status, sort, folder_tag).await?;
     Ok(Json(books))
 }
 
@@ -304,18 +306,18 @@ async fn save_progress(
     let saved = fetch_progress(&state.db, id)
         .await?
         .expect("progress exists after save");
-        tracing::info!(
-            book_id = id,
-            title = %title,
-            source,
-            client_id,
-            session_id,
-            user_agent,
-            percent = saved.percent,
-            char_offset = saved.char_offset,
-            allow_backward,
-            "saved reading progress"
-        );
+    tracing::info!(
+        book_id = id,
+        title = %title,
+        source,
+        client_id,
+        session_id,
+        user_agent,
+        percent = saved.percent,
+        char_offset = saved.char_offset,
+        allow_backward,
+        "saved reading progress"
+    );
 
     Ok(Json(saved))
 }
@@ -645,11 +647,18 @@ mod tests {
 
         let Json(resp) = shelf(State(fixture.state.clone())).await.unwrap();
 
-        assert_eq!(resp.books.len(), 2, "Root and single-folder books should be in root");
+        assert_eq!(
+            resp.books.len(),
+            2,
+            "Root and single-folder books should be in root"
+        );
         let mut titles: Vec<String> = resp.books.iter().map(|b| b.title.clone()).collect();
         titles.sort();
         assert!(titles.contains(&"Root".to_string()));
-        assert!(titles.contains(&"Single".to_string()), "Single-book folder should collapse to root");
+        assert!(
+            titles.contains(&"Single".to_string()),
+            "Single-book folder should collapse to root"
+        );
 
         assert_eq!(resp.folders.len(), 1, "Multi-book folder should appear");
         assert_eq!(resp.folders[0].name, "Author");

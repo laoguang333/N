@@ -4,6 +4,7 @@
 /novels/
 /certs/
 /logs/
+/release/
 /frontend/node_modules/
 /frontend/dist/
 *.sqlite

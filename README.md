@@ -111,6 +111,28 @@ cargo run
 
 后端会在存在 `frontend/dist/index.html` 时直接托管前端静态文件。
 
+## Windows 安装包
+
+项目使用 Inno Setup 6 生成发布版安装程序。先安装 Inno Setup，然后运行：
+
+```powershell
+python .\scripts\package_windows.py
+```
+
+脚本会构建前端、编译 Rust release 版，并输出：
+
+```text
+release\txt-reader-版本号-setup.exe
+```
+
+安装包包含 `txt-reader.exe`、`frontend/dist` 静态文件、默认 `config.toml`、空 `data` 和 `novels` 目录。升级安装会保留已有 `config.toml`、数据库和小说目录。
+
+如果已经手动完成构建，可以跳过构建步骤：
+
+```powershell
+python .\scripts\package_windows.py --skip-build
+```
+
 ## 局域网访问
 
 默认监听地址是：
