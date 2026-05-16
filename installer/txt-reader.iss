@@ -28,6 +28,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 CloseApplications=yes
 RestartApplications=no
+SetupIconFile={#ProjectRoot}\target\release\txt-reader.ico
+UninstallDisplayIcon={app}\txt-reader.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -41,13 +43,14 @@ Name: "{app}\novels"
 
 [Files]
 Source: "{#ProjectRoot}\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ProjectRoot}\target\release\txt-reader.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\frontend\dist\*"; DestDir: "{app}\frontend\dist"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ProjectRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\TXT Reader"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"
+Name: "{group}\TXT Reader"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\txt-reader.ico"
 Name: "{group}\Uninstall TXT Reader"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\TXT Reader"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\{#AppExeName}"
+Name: "{autodesktop}\TXT Reader"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\txt-reader.ico"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch TXT Reader"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

@@ -17,11 +17,14 @@ fn main() {
         };
 
         let ico_path = out_dir.join("txt-reader.ico");
-        println!("cargo:rerun-if-changed=frontend/public/icon.svg");
+        println!("cargo:rerun-if-changed=assets/app-icon.svg");
 
         if let Err(err) = build_windows_icon(&ico_path) {
             println!("cargo:warning=failed to build Windows icon: {err}");
             return;
+        }
+        if let Err(err) = copy_packaging_icon(&ico_path) {
+            println!("cargo:warning=failed to copy Windows packaging icon: {err}");
         }
 
         let mut res = winres::WindowsResource::new();
@@ -36,23 +39,46 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn build_windows_icon(ico_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    use image::{ImageFormat, ImageReader};
+    use image::codecs::ico::{IcoEncoder, IcoFrame};
+    use image::ExtendedColorType;
     use resvg::usvg::{Options, Tree};
 
-    let svg = fs::read("frontend/public/icon.svg")?;
+    const ICON_SIZES: &[u32] = &[16, 20, 24, 32, 40, 48, 64, 128, 256];
+
+    let svg = fs::read("assets/app-icon.svg")?;
     let opt = Options::default();
     let rtree = Tree::from_data(&svg, &opt)?;
-    let mut pixmap = tiny_skia::Pixmap::new(256, 256).ok_or("failed to create pixmap")?;
-    resvg::render(
-        &rtree,
-        tiny_skia::Transform::default(),
-        &mut pixmap.as_mut(),
-    );
+    let svg_size = rtree.size();
+    let mut images = Vec::new();
 
-    let png_path = ico_path.with_extension("png");
-    pixmap.save_png(&png_path)?;
-    let img = ImageReader::open(&png_path)?.decode()?;
-    img.save_with_format(ico_path, ImageFormat::Ico)?;
-    let _ = fs::remove_file(png_path);
+    for size in ICON_SIZES {
+        let mut pixmap =
+            tiny_skia::Pixmap::new(*size, *size).ok_or("failed to create icon pixmap")?;
+        let transform = tiny_skia::Transform::from_scale(
+            *size as f32 / svg_size.width(),
+            *size as f32 / svg_size.height(),
+        );
+        resvg::render(&rtree, transform, &mut pixmap.as_mut());
+        images.push(pixmap.take());
+    }
+
+    let frames = images
+        .iter()
+        .zip(ICON_SIZES)
+        .map(|(rgba, size)| IcoFrame::as_png(rgba, *size, *size, ExtendedColorType::Rgba8))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let file = fs::File::create(ico_path)?;
+    IcoEncoder::new(file).encode_images(&frames)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn copy_packaging_icon(ico_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let profile = env::var("PROFILE")?;
+    let target_dir = manifest_dir.join("target").join(profile);
+    fs::create_dir_all(&target_dir)?;
+    fs::copy(ico_path, target_dir.join("txt-reader.ico"))?;
     Ok(())
 }

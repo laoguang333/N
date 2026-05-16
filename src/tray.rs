@@ -129,14 +129,7 @@ fn build_menu() -> Result<(Menu, MenuItem)> {
 }
 
 fn build_icon() -> Result<Icon> {
-    let svg = r##"
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#111827"/>
-  <path d="M16 46L26 18H38L48 46H39.5L37.2 39.2H26.8L24.5 46Z" fill="#E5E7EB"/>
-  <path d="M30.5 34H33.5L32 29.2Z" fill="#111827"/>
-  <path d="M27 29.2L24.8 22.8H28.8L30.2 26.9L31.6 22.8H35.6L33.4 29.2Z" fill="#60A5FA"/>
-</svg>
-"##;
+    let svg = include_str!("../assets/app-icon.svg");
 
     let options = usvg::Options::default();
     let tree = usvg::Tree::from_str(svg, &options).context("failed to parse tray SVG")?;

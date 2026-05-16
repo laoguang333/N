@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { useVirtualizer } from "@tanstack/vue-virtual";
+import { useVirtualizer, useWindowVirtualizer } from "@tanstack/vue-virtual";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -88,9 +88,12 @@ const reader = reactive({
 const settings = reactive(loadSettings());
 const readerRoot = ref(null);
 const searchResultsRoot = ref(null);
+const shelfListRoot = ref(null);
+const shelfScrollMargin = ref(0);
 let saveTimer = null;
 let scrollTimer = null;
 let shelfTimer = null;
+let shelfMeasureFrame = null;
 let periodicSaveTimer = null;
 let progressFrame = null;
 let saveInFlight = false;
@@ -112,13 +115,33 @@ const virtualizer = useVirtualizer({
   useAnimationFrameWithResizeObserver: true,
 });
 
+const shelfItems = computed(() => {
+  return shelf.items;
+});
+
+const shelfVirtualizer = useWindowVirtualizer({
+  get count() { return shelfItems.value.length; },
+  estimateSize: () => 86,
+  overscan: 8,
+  gap: 10,
+  get scrollMargin() { return shelfScrollMargin.value; },
+  get enabled() { return route.name === "shelf" && shelfItems.value.length > 0; },
+  useAnimationFrameWithResizeObserver: true,
+});
+
 const themeClass = computed(() => `theme-${settings.theme}`);
 const libraryHint = computed(() => shelf.config?.library_dirs?.join(", ") || "novels");
 const readerProgressValue = computed(() => Math.round(reader.visiblePercent * 1000));
 const readerProgressLabel = computed(() => `${Math.round(reader.visiblePercent * 100)}%`);
 
-const shelfItems = computed(() => {
-  return shelf.items;
+const shelfVirtualRows = computed(() => {
+  return shelfVirtualizer.value
+    .getVirtualItems()
+    .map((virtualRow) => ({
+      virtualRow,
+      item: shelfItems.value[virtualRow.index],
+    }))
+    .filter(({ item }) => Boolean(item));
 });
 
 watch(
@@ -151,6 +174,7 @@ onMounted(() => {
   window.addEventListener("pagehide", flushProgress);
   window.addEventListener("touchend", onReaderInteractionEnd, { passive: true });
   window.addEventListener("pointerup", onReaderInteractionEnd, { passive: true });
+  window.addEventListener("resize", scheduleShelfMeasure, { passive: true });
   document.addEventListener("visibilitychange", onVisibilityChange);
   periodicSaveTimer = window.setTimeout(periodicProgressSave, SAVE_BASE_INTERVAL);
   loadConfig();
@@ -163,6 +187,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pagehide", flushProgress);
   window.removeEventListener("touchend", onReaderInteractionEnd);
   window.removeEventListener("pointerup", onReaderInteractionEnd);
+  window.removeEventListener("resize", scheduleShelfMeasure);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   window.clearTimeout(saveTimer);
   window.clearTimeout(scrollTimer);
@@ -172,6 +197,9 @@ onBeforeUnmount(() => {
   window.clearTimeout(searchDebounceTimer);
   if (progressFrame) {
     window.cancelAnimationFrame(progressFrame);
+  }
+  if (shelfMeasureFrame) {
+    window.cancelAnimationFrame(shelfMeasureFrame);
   }
 });
 
@@ -244,6 +272,7 @@ function parseHash() {
   route.bookId = null;
   reader.settingsOpen = false;
   shelf.folderTag = null;
+  scheduleShelfMeasure();
   if (shouldRestoreShelf) {
     nextTick(restoreShelfScroll);
   }
@@ -268,6 +297,7 @@ async function loadBooks() {
       sort: shelf.sort,
     });
     shelf.items = normalizeShelfItems(data);
+    scheduleShelfMeasure();
   } catch (error) {
     shelf.error = error.message;
   } finally {
@@ -377,6 +407,27 @@ function scheduleVirtualMeasure() {
     window.requestAnimationFrame(() => {
       virtualizer.value.measure();
       updateVisibleProgress();
+    });
+  });
+}
+
+function scheduleShelfMeasure() {
+  if (route.name !== "shelf") {
+    return;
+  }
+
+  nextTick(() => {
+    if (shelfMeasureFrame) {
+      window.cancelAnimationFrame(shelfMeasureFrame);
+    }
+    shelfMeasureFrame = window.requestAnimationFrame(() => {
+      shelfMeasureFrame = null;
+      const list = shelfListRoot.value;
+      if (!list) {
+        return;
+      }
+      shelfScrollMargin.value = list.getBoundingClientRect().top + window.scrollY;
+      shelfVirtualizer.value.measure();
     });
   });
 }
@@ -964,13 +1015,30 @@ async function updateRating(book, rating) {
         <span>书库目录：{{ libraryHint }}</span>
       </div>
 
-      <div v-else class="book-list">
-        <template v-for="item in shelfItems" :key="item.type === 'folder' ? `f-${item.name}` : `b-${item.id}`">
+      <div
+        v-else
+        ref="shelfListRoot"
+        class="book-list"
+        :style="{
+          height: `${shelfVirtualizer.getTotalSize()}px`,
+          position: 'relative',
+        }"
+      >
+        <template v-for="{ virtualRow, item } in shelfVirtualRows" :key="item.type === 'folder' ? `f-${item.name}` : `b-${item.id}`">
           <article
             v-if="item.type === 'folder'"
             class="book-row folder-row"
             role="button"
             tabindex="0"
+            :ref="shelfVirtualizer.measureElement"
+            :data-index="virtualRow.index"
+            :style="{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start - shelfScrollMargin}px)`,
+            }"
             @click="openFolder(item.name)"
             @keydown="(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFolder(item.name) } }"
           >
@@ -986,6 +1054,15 @@ async function updateRating(book, rating) {
             class="book-row"
             role="button"
             tabindex="0"
+            :ref="shelfVirtualizer.measureElement"
+            :data-index="virtualRow.index"
+            :style="{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start - shelfScrollMargin}px)`,
+            }"
             @click="openReader(item.id)"
             @keydown="openReaderByKeyboard($event, item.id)"
           >
