@@ -1,6 +1,6 @@
 # TXT Reader
 
-家庭内网使用的 Web TXT 小说阅读器。后端使用 Axum + Rust + SQLite，前端使用 Vue + Vite。
+家庭内网使用的 Web TXT 小说阅读器。后端使用 Axum + Rust + SQLite，前端使用 React + Vite。
 
 ## 功能
 

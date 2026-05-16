@@ -711,7 +711,7 @@ export default function App() {
           <header className="shelf-header">
             <div>
               <p className="eyebrow">TXT Reader</p>
-              <h1>TXT Reader React</h1>
+              <h1>书架</h1>
             </div>
             <button className="icon-button" type="button" disabled={shelf.scanning} onClick={runScan} title="扫描书库">
               {shelf.scanning ? <LoaderCircle className="spin" size={22} /> : <RefreshCw size={22} />}
@@ -852,7 +852,7 @@ export default function App() {
           <header className="shelf-header">
             <div>
               <p className="eyebrow">TXT Reader</p>
-              <h1>A / React</h1>
+              <h1>A</h1>
             </div>
           </header>
           <div className="empty-state">
@@ -870,7 +870,7 @@ export default function App() {
               <ArrowLeft size={22} />
             </button>
             <div className="reader-title">
-              <strong>{reader.book?.title || "Reading"} · React</strong>
+              <strong>{reader.book?.title || "Reading"}</strong>
             </div>
             <div className="toolbar-actions">
               <button className="icon-button" type="button" onClick={() => updateReader({ searchOpen: !reader.searchOpen, controlsVisible: true })} title="Search">
