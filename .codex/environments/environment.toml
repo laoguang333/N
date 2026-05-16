@@ -36,6 +36,11 @@ icon = "check"
 command = "python scripts/codex.py check"
 
 [[actions]]
+name = "打包安装包"
+icon = "package"
+command = "python scripts/codex.py package-windows"
+
+[[actions]]
 name = "检查 234 端口"
 icon = "search"
 command = "python scripts/codex.py port"

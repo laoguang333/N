@@ -114,13 +114,15 @@ export default function App() {
   const readerRoot = useRef<HTMLElement | null>(null);
   const searchResultsRoot = useRef<HTMLDivElement | null>(null);
   const shelfListRoot = useRef<HTMLDivElement | null>(null);
-  const shelfScrollMargin = useRef(0);
+  const [shelfScrollMargin, setShelfScrollMargin] = useState(0);
   const saveTimer = useRef<number | null>(null);
   const scrollTimer = useRef<number | null>(null);
   const shelfTimer = useRef<number | null>(null);
   const shelfMeasureFrame = useRef<number | null>(null);
   const periodicSaveTimer = useRef<number | null>(null);
   const progressFrame = useRef<number | null>(null);
+  const autoScrollSaveTimer = useRef<number | null>(null);
+  const autoScrollProgressUpdatedAt = useRef(0);
   const saveInFlight = useRef(false);
   const restoreSavingBlocked = useRef(false);
   const lastSaveSucceeded = useRef(true);
@@ -141,7 +143,7 @@ export default function App() {
     estimateSize: () => 86,
     overscan: 8,
     gap: 10,
-    scrollMargin: shelfScrollMargin.current,
+    scrollMargin: shelfScrollMargin,
     enabled: route.name === "shelf" && shelf.items.length > 0,
   });
 
@@ -336,7 +338,10 @@ export default function App() {
       shelfMeasureFrame.current = null;
       const list = shelfListRoot.current;
       if (!list) return;
-      shelfScrollMargin.current = list.getBoundingClientRect().top + window.scrollY;
+      const nextScrollMargin = list.getBoundingClientRect().top + window.scrollY;
+      setShelfScrollMargin((current) => (
+        Math.abs(current - nextScrollMargin) > 0.5 ? nextScrollMargin : current
+      ));
       shelfVirtualizer.measure();
     });
   }, [shelfVirtualizer]);
@@ -535,6 +540,12 @@ export default function App() {
   }, [openBook, route]);
 
   useEffect(() => {
+    if (route.name === "shelf" && shelf.items.length > 0) {
+      scheduleShelfMeasure();
+    }
+  }, [route.name, scheduleShelfMeasure, shelf.items.length]);
+
+  useEffect(() => {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
     shelfTimer.current = window.setTimeout(loadBooks, 180);
   }, [shelf.search, shelf.status, shelf.minRating, shelf.sort]);
@@ -591,7 +602,7 @@ export default function App() {
       window.removeEventListener("pointerup", onReaderInteractionEnd);
       window.removeEventListener("resize", scheduleShelfMeasure);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      [saveTimer, scrollTimer, shelfTimer, periodicSaveTimer, toastTimer, searchDebounceTimer].forEach((timer) => {
+      [saveTimer, scrollTimer, shelfTimer, periodicSaveTimer, toastTimer, searchDebounceTimer, autoScrollSaveTimer].forEach((timer) => {
         if (timer.current) window.clearTimeout(timer.current);
       });
       if (progressFrame.current) window.cancelAnimationFrame(progressFrame.current);
@@ -620,6 +631,21 @@ export default function App() {
 
   function onReaderScroll() {
     if (!canSaveReaderProgress()) return;
+    if (readerRef.current.autoScrollPlaying) {
+      const now = performance.now();
+      if (now - autoScrollProgressUpdatedAt.current > 160) {
+        autoScrollProgressUpdatedAt.current = now;
+        updateVisibleProgress();
+      }
+      if (autoScrollSaveTimer.current === null) {
+        autoScrollSaveTimer.current = window.setTimeout(() => {
+          autoScrollSaveTimer.current = null;
+          snapshotProgress({ source: "auto_scroll", persistLocal: false });
+          scheduleProgressSave(450, { source: "auto_scroll" });
+        }, 900);
+      }
+      return;
+    }
     if (progressFrame.current === null) {
       progressFrame.current = window.requestAnimationFrame(() => {
         progressFrame.current = null;
@@ -771,7 +797,7 @@ export default function App() {
                   tabIndex={0}
                   ref={shelfVirtualizer.measureElement}
                   data-index={virtualRow.index}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start - shelfScrollMargin.current}px)` }}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start - shelfScrollMargin}px)` }}
                   onClick={() => updateShelf({ folderTag: item.name })}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
@@ -794,7 +820,7 @@ export default function App() {
                   tabIndex={0}
                   ref={shelfVirtualizer.measureElement}
                   data-index={virtualRow.index}
-                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start - shelfScrollMargin.current}px)` }}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start - shelfScrollMargin}px)` }}
                   onClick={() => openReader(item.id)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {

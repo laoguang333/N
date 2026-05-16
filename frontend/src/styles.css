@@ -657,6 +657,105 @@ h1 {
   transform: translateY(-10px);
 }
 
+.auto-scroll-fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+  z-index: 25;
+  opacity: 0;
+  transform: scale(0.85);
+  pointer-events: auto;
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
+}
+
+.auto-scroll-fab.visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.fab-button {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background 0.18s,
+    border-color 0.18s,
+    box-shadow 0.18s;
+}
+
+.fab-speed {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.auto-scroll-speed-panel {
+  position: absolute;
+  right: 0;
+  bottom: 58px;
+  display: grid;
+  grid-template-columns: 34px minmax(148px, 1fr) 34px;
+  align-items: center;
+  gap: 8px;
+  width: min(260px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 16%);
+  backdrop-filter: blur(14px);
+}
+
+.speed-step-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.speed-slider {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.speed-slider span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--surface);
+  font-size: 14px;
+  font-weight: 800;
+  background: var(--accent);
+}
+
+.speed-slider input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

@@ -27,6 +27,7 @@ def main() -> int:
     subcommands.add_parser("start-backend")
     subcommands.add_parser("dev")
     subcommands.add_parser("check")
+    subcommands.add_parser("package-windows")
     subcommands.add_parser("setup-https")
     subcommands.add_parser("port")
 
@@ -50,6 +51,8 @@ def main() -> int:
             run([sys.executable, str(ROOT / "scripts" / "dev.py")], ROOT)
         case "check":
             run([sys.executable, str(ROOT / "scripts" / "check.py")], ROOT)
+        case "package-windows":
+            run([sys.executable, str(ROOT / "scripts" / "package_windows.py"), "--bump-patch"], ROOT)
         case "setup-https":
             setup_https()
         case "port":

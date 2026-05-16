@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Play } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Minus, Pause, Play, Plus } from "lucide-react";
 
 const SPEED_TABLE = [0, 4, 6, 9, 12, 16, 20, 26, 32, 40, 50];
 
@@ -18,24 +18,16 @@ export default function AutoScroll({
   onPlayingChange,
   onSpeedChange,
 }: AutoScrollProps) {
-  const dialRef = useRef<HTMLDivElement | null>(null);
   const rafId = useRef<number | null>(null);
   const lastTime = useRef(0);
   const longPressTimer = useRef<number | null>(null);
   const hideTimer = useRef<number | null>(null);
   const pointerStart = useRef<{ x: number; y: number; time: number } | null>(null);
-  const [dialOpen, setDialOpen] = useState(false);
   const [fabVisible, setFabVisible] = useState(false);
 
   const displaySpeed = Math.max(1, Math.min(10, Math.round(speed || 5)));
   const pxPerMs = SPEED_TABLE[displaySpeed] / 100;
-  const arcOffset = useMemo(() => {
-    const r = 78;
-    const c = 2 * Math.PI * r;
-    const filled = (displaySpeed / 10) * c;
-    return `${filled} ${c}`;
-  }, [displaySpeed]);
-  const showFab = fabVisible || dialOpen;
+  const showFab = fabVisible;
 
   function clearLongPress() {
     if (longPressTimer.current) {
@@ -48,17 +40,15 @@ export default function AutoScroll({
     setFabVisible(true);
     if (hideTimer.current) window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => {
-      if (!dialOpen) setFabVisible(false);
-    }, 3000);
+      setFabVisible(false);
+    }, playing ? 2200 : 3000);
   }
 
   function onButtonPointerDown(event: React.PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
     revealFab();
-    if (dialOpen) return;
     pointerStart.current = { x: event.clientX, y: event.clientY, time: Date.now() };
     longPressTimer.current = window.setTimeout(() => {
-      setDialOpen(true);
       pointerStart.current = null;
       clearLongPress();
     }, 420);
@@ -74,6 +64,7 @@ export default function AutoScroll({
     const dy = event.clientY - start.y;
     if (Math.hypot(dx, dy) <= 6 && dt < 400) {
       onPlayingChange(!playing);
+      revealFab();
     }
   }
 
@@ -83,6 +74,11 @@ export default function AutoScroll({
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) {
       clearLongPress();
     }
+  }
+
+  function changeSpeed(nextSpeed: number) {
+    onSpeedChange(Math.max(1, Math.min(10, nextSpeed)));
+    revealFab();
   }
 
   useEffect(() => {
@@ -95,7 +91,7 @@ export default function AutoScroll({
 
     function tick(now: number) {
       if (lastTime.current === 0) lastTime.current = now;
-      const elapsed = Math.min(48, now - lastTime.current);
+      const elapsed = Math.min(24, now - lastTime.current);
       lastTime.current = now;
 
       const el = scrollElement || document.querySelector<HTMLElement>(".reader-content");
@@ -120,33 +116,8 @@ export default function AutoScroll({
   }, [onPlayingChange, playing, pxPerMs, scrollElement]);
 
   useEffect(() => {
-    if (!dialOpen) return undefined;
-
-    function onMove(event: PointerEvent) {
-      event.preventDefault();
-      const el = dialRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      let angle = Math.atan2(event.clientY - cy, event.clientX - cx);
-      angle = (angle + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
-      onSpeedChange(Math.max(1, Math.min(10, Math.round((angle / (Math.PI * 2)) * 10) || 10)));
-    }
-
-    function onUp() {
-      setDialOpen(false);
-      if (hideTimer.current) window.clearTimeout(hideTimer.current);
-      hideTimer.current = window.setTimeout(() => setFabVisible(false), 3000);
-    }
-
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-    return () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-    };
-  }, [dialOpen, onSpeedChange]);
+    if (playing) revealFab();
+  }, [playing]);
 
   useEffect(() => {
     return () => {
@@ -158,6 +129,39 @@ export default function AutoScroll({
 
   return (
     <div className={`auto-scroll-fab ${showFab ? "visible" : ""}`}>
+      {showFab && (
+        <div className="auto-scroll-speed-panel" onPointerDown={(event) => event.stopPropagation()}>
+          <button
+            className="speed-step-button"
+            type="button"
+            title="降低速度"
+            onClick={() => changeSpeed(displaySpeed - 1)}
+          >
+            <Minus size={16} />
+          </button>
+          <label className="speed-slider">
+            <span>{displaySpeed}</span>
+            <input
+              type="range"
+              min="1"
+              max="10"
+              step="1"
+              value={displaySpeed}
+              aria-label="自动滚动速度"
+              onChange={(event) => changeSpeed(Number(event.target.value))}
+            />
+          </label>
+          <button
+            className="speed-step-button"
+            type="button"
+            title="提高速度"
+            onClick={() => changeSpeed(displaySpeed + 1)}
+          >
+            <Plus size={16} />
+          </button>
+        </div>
+      )}
+
       <button
         className="fab-button"
         type="button"
@@ -167,43 +171,8 @@ export default function AutoScroll({
         onPointerLeave={onButtonPointerUp}
         onPointerMove={onButtonPointerMove}
       >
-        {playing ? <span className="fab-speed">{displaySpeed}</span> : <Play size={22} />}
+        {playing ? <Pause size={22} /> : <Play size={22} />}
       </button>
-
-      {dialOpen && (
-        <div className="auto-scroll-dial-overlay" onPointerDown={(event) => event.preventDefault()}>
-          <div ref={dialRef} className="speed-dial">
-            <svg viewBox="0 0 200 200" className="dial-svg">
-              <circle cx="100" cy="100" r="78" fill="none" className="dial-track" strokeWidth="10" />
-              <circle
-                cx="100"
-                cy="100"
-                r="78"
-                fill="none"
-                className="dial-fill"
-                strokeWidth="10"
-                strokeLinecap="round"
-                strokeDasharray={arcOffset}
-                transform="rotate(-90 100 100)"
-              />
-              <text x="100" y="94" className="dial-value">{displaySpeed}</text>
-              <text x="100" y="116" className="dial-label">档</text>
-            </svg>
-            <div className="dial-tickmarks">
-              {Array.from({ length: 10 }, (_, index) => {
-                const n = index + 1;
-                return (
-                  <span
-                    key={n}
-                    className={`dial-tick ${n <= displaySpeed ? "active" : ""}`}
-                    style={{ transform: `rotate(${n * 36 - 90}deg) translate(0, -94px)` }}
-                  />
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
