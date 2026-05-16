@@ -4,8 +4,14 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
+  Film,
   FolderClosed,
+  Download,
   LoaderCircle,
+  Maximize,
+  Pause,
+  PictureInPicture2,
+  Play,
   Moon,
   RefreshCw,
   Search,
@@ -25,6 +31,10 @@ import {
   saveProgressKeepalive,
   saveRating,
   scanLibrary,
+  animeFileUrl,
+  getAnimeHlsStatus,
+  prepareAnimeHls,
+  probeAnime,
 } from "./api";
 import {
   PROGRESS_CACHE_KEY,
@@ -71,6 +81,17 @@ function afterNextPaint() {
   });
 }
 
+function formatAnimeDuration(seconds: number) {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
 export default function App() {
   const clientId = useMemo(loadClientId, []);
   const sessionId = useMemo(createId, []);
@@ -110,8 +131,24 @@ export default function App() {
     autoScrollPlaying: false,
     autoScrollSpeed: 5,
   });
+  const [anime, setAnime] = useState({
+    path: "",
+    activePath: "",
+    mode: "direct",
+    error: "",
+    duration: null as number | null,
+    hlsUrl: "",
+    hlsStatus: "",
+    loading: false,
+    playing: false,
+    currentTime: 0,
+    videoDuration: 0,
+    playbackRate: 1,
+    fullscreen: false,
+  });
 
   const readerRoot = useRef<HTMLElement | null>(null);
+  const animeVideoRef = useRef<HTMLVideoElement | null>(null);
   const searchResultsRoot = useRef<HTMLDivElement | null>(null);
   const shelfListRoot = useRef<HTMLDivElement | null>(null);
   const [shelfScrollMargin, setShelfScrollMargin] = useState(0);
@@ -165,6 +202,10 @@ export default function App() {
 
   function updateShelf(patch: Partial<typeof shelf> | ((value: typeof shelf) => typeof shelf)) {
     setShelf((current) => typeof patch === "function" ? patch(current) : { ...current, ...patch });
+  }
+
+  function updateAnime(patch: Partial<typeof anime> | ((value: typeof anime) => typeof anime)) {
+    setAnime((current) => typeof patch === "function" ? patch(current) : { ...current, ...patch });
   }
 
   const canSaveReaderProgress = useCallback(() => {
@@ -672,6 +713,105 @@ export default function App() {
     window.location.hash = name === "a" ? "#/a" : "#/";
   }
 
+  function playAnime(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const path = anime.path.trim();
+    if (!path) {
+      updateAnime({ error: "请输入本地视频路径", activePath: "" });
+      return;
+    }
+    void openAnime(path);
+  }
+
+  async function openAnime(path: string) {
+    updateAnime({ activePath: path, error: "", duration: null, hlsUrl: "", hlsStatus: "", loading: true });
+    try {
+      const probe = await probeAnime(path);
+      updateAnime({ duration: probe.duration ?? null, loading: false });
+      if (anime.mode === "hls") {
+        await prepareHls(path);
+      }
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, loading: false });
+    }
+  }
+
+  async function prepareHls(path: string) {
+    updateAnime({ hlsStatus: "正在准备 HLS 转码缓存...", hlsUrl: "", loading: true });
+    try {
+      const prepared = await prepareAnimeHls(path);
+      if (prepared.ready) {
+        updateAnime({ hlsUrl: prepared.playlist_url, hlsStatus: "HLS 已就绪", loading: false });
+        return;
+      }
+      updateAnime({ hlsStatus: "转码中，完成后会自动切换到 HLS 播放", loading: true });
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, loading: false });
+    }
+  }
+
+  function updateAnimePlayback() {
+    const video = animeVideoRef.current;
+    if (!video) return;
+    updateAnime({
+      playing: !video.paused,
+      currentTime: video.currentTime || 0,
+      videoDuration: Number.isFinite(video.duration) ? video.duration : 0,
+      playbackRate: video.playbackRate,
+    });
+  }
+
+  async function toggleAnimePlayback() {
+    const video = animeVideoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      await video.play();
+    } else {
+      video.pause();
+    }
+    updateAnimePlayback();
+  }
+
+  function seekAnime(event: React.ChangeEvent<HTMLInputElement>) {
+    const video = animeVideoRef.current;
+    if (!video) return;
+    const nextTime = Number(event.target.value);
+    video.currentTime = nextTime;
+    updateAnime({ currentTime: nextTime });
+  }
+
+  function changeAnimeSpeed(event: React.ChangeEvent<HTMLSelectElement>) {
+    const video = animeVideoRef.current;
+    const playbackRate = Number(event.target.value);
+    if (video) video.playbackRate = playbackRate;
+    updateAnime({ playbackRate });
+  }
+
+  async function openAnimePictureInPicture() {
+    const video = animeVideoRef.current;
+    if (!video || !document.pictureInPictureEnabled) return;
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else {
+      await video.requestPictureInPicture();
+    }
+  }
+
+  async function toggleAnimeFullscreen() {
+    const shell = document.querySelector<HTMLElement>(".anime-player-frame");
+    if (!shell) return;
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else {
+      await shell.requestFullscreen();
+    }
+  }
+
+  function downloadAnime() {
+    if (!anime.activePath) return;
+    window.open(animeFileUrl(anime.activePath), "_blank", "noopener,noreferrer");
+  }
+
   async function updateRating(book: any, rating: number) {
     const nextRating = book.rating === rating ? null : rating;
     updateShelf({ ratingBookId: book.id, error: "" });
@@ -729,6 +869,62 @@ export default function App() {
     virtualRow,
     item: shelf.items[virtualRow.index],
   })).filter(({ item }) => Boolean(item));
+
+  useEffect(() => {
+    if (route.name !== "tab-a" || anime.mode !== "hls" || !anime.activePath || anime.hlsUrl) return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await getAnimeHlsStatus(anime.activePath);
+        if (cancelled) return;
+        if (status.ready) {
+          updateAnime({ hlsUrl: status.playlist_url, hlsStatus: "HLS 已就绪", loading: false });
+          window.clearInterval(timer);
+        } else {
+          updateAnime({ hlsStatus: "转码中，完成后会自动切换到 HLS 播放" });
+        }
+      } catch (error) {
+        if (!cancelled) updateAnime({ error: (error as Error).message, loading: false });
+        window.clearInterval(timer);
+      }
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [anime.activePath, anime.hlsUrl, anime.mode, route.name]);
+
+  useEffect(() => {
+    if (route.name !== "tab-a") return;
+    const video = animeVideoRef.current;
+    if (!video) return;
+    let hls: { destroy: () => void } | null = null;
+    let cancelled = false;
+    if (anime.mode === "hls" && anime.hlsUrl) {
+      void import("hls.js").then(({ default: Hls }) => {
+        if (cancelled) return;
+        if (Hls.isSupported()) {
+          hls = new Hls();
+          hls.loadSource(anime.hlsUrl);
+          hls.attachMedia(video);
+        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+          video.src = anime.hlsUrl;
+        }
+      });
+    }
+    return () => {
+      cancelled = true;
+      hls?.destroy();
+    };
+  }, [anime.hlsUrl, anime.mode, route.name]);
+
+  useEffect(() => {
+    function onFullscreenChange() {
+      updateAnime({ fullscreen: Boolean(document.fullscreenElement) });
+    }
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
 
   return (
     <main className={`app-shell ${themeClass}`}>
@@ -878,14 +1074,117 @@ export default function App() {
           <header className="shelf-header">
             <div>
               <p className="eyebrow">TXT Reader</p>
-              <h1>A</h1>
+              <h1>Anime</h1>
             </div>
           </header>
-          <div className="empty-state">
-            <BookOpen size={34} />
-            <p>A 页面</p>
-            <span>内容正在建设中</span>
+          <form className="anime-path-form" onSubmit={playAnime}>
+            <label className="anime-path-field">
+              <Film size={20} />
+              <input
+                value={anime.path}
+                onChange={(event) => updateAnime({ path: event.target.value })}
+                type="text"
+                placeholder="输入本地视频路径，例如 C:\\Videos\\demo.mkv"
+              />
+            </label>
+            <button type="submit" className="anime-play-button">
+              <Play size={18} />
+              播放
+            </button>
+          </form>
+          <div className="anime-mode-row">
+            <button
+              type="button"
+              className={anime.mode === "direct" ? "active" : ""}
+              onClick={() => updateAnime({ mode: "direct", hlsUrl: "", hlsStatus: "" })}
+            >
+              原文件
+            </button>
+            <button
+              type="button"
+              className={anime.mode === "hls" ? "active" : ""}
+              onClick={() => {
+                updateAnime({ mode: "hls", hlsUrl: "", hlsStatus: "" });
+                if (anime.activePath) void prepareHls(anime.activePath);
+              }}
+            >
+              转码 HLS
+            </button>
           </div>
+          {anime.error && <p className="error">{anime.error}</p>}
+          {anime.duration !== null && (
+            <p className="anime-meta">时长 {formatAnimeDuration(anime.duration)} · {anime.mode === "direct" ? "浏览器 Range 播放，可拖动" : "hls.js 播放转码缓存"}</p>
+          )}
+          <p className={`anime-quality ${anime.mode === "direct" ? "is-original" : "is-transcoded"}`}>
+            {anime.mode === "direct"
+              ? "画质：原文件直出，后端不重新编码；清晰度取决于浏览器解码能力和源文件本身。"
+              : "画质：HLS 转码预览，会重新编码，不保证与本地播放器完全一致。"}
+          </p>
+          {anime.hlsStatus && <p className="notice">{anime.hlsStatus}</p>}
+          <section className="anime-player-shell">
+            {anime.activePath ? (
+              <>
+                <div className="anime-player-frame">
+                  <video
+                    key={anime.activePath}
+                    ref={animeVideoRef}
+                    className="anime-player"
+                    playsInline
+                    src={anime.mode === "direct" ? animeFileUrl(anime.activePath) : undefined}
+                    onClick={toggleAnimePlayback}
+                    onLoadedMetadata={updateAnimePlayback}
+                    onDurationChange={updateAnimePlayback}
+                    onTimeUpdate={updateAnimePlayback}
+                    onPlay={updateAnimePlayback}
+                    onPause={updateAnimePlayback}
+                    onRateChange={updateAnimePlayback}
+                    onError={() => updateAnime({ error: "视频加载失败，请确认路径可访问且 ffmpeg 能读取该文件" })}
+                  />
+                  <div className="anime-controls">
+                    <button type="button" className="anime-control-button" onClick={toggleAnimePlayback} title={anime.playing ? "暂停" : "播放"}>
+                      {anime.playing ? <Pause size={18} /> : <Play size={18} />}
+                    </button>
+                    <span className="anime-time">{formatAnimeDuration(anime.currentTime)}</span>
+                    <input
+                      className="anime-seek"
+                      type="range"
+                      min="0"
+                      max={Math.max(1, anime.videoDuration || anime.duration || 0)}
+                      step="0.1"
+                      value={Math.min(anime.currentTime, Math.max(1, anime.videoDuration || anime.duration || 0))}
+                      aria-label="视频进度"
+                      onChange={seekAnime}
+                    />
+                    <span className="anime-time">{formatAnimeDuration(anime.videoDuration || anime.duration || 0)}</span>
+                    <select className="anime-speed-select" value={anime.playbackRate} onChange={changeAnimeSpeed} aria-label="播放速度">
+                      <option value="0.5">0.5x</option>
+                      <option value="0.75">0.75x</option>
+                      <option value="1">1x</option>
+                      <option value="1.25">1.25x</option>
+                      <option value="1.5">1.5x</option>
+                      <option value="2">2x</option>
+                    </select>
+                    <button type="button" className="anime-control-button" onClick={openAnimePictureInPicture} title="画中画">
+                      <PictureInPicture2 size={18} />
+                    </button>
+                    <button type="button" className="anime-control-button" onClick={downloadAnime} title="下载/打开原文件流">
+                      <Download size={18} />
+                    </button>
+                    <button type="button" className="anime-control-button" onClick={toggleAnimeFullscreen} title={anime.fullscreen ? "退出全屏" : "全屏"}>
+                      <Maximize size={18} />
+                    </button>
+                  </div>
+                </div>
+                <p className="anime-current-path">{anime.activePath}</p>
+              </>
+            ) : (
+              <div className="empty-state anime-empty">
+                <Film size={34} />
+                <p>实时转码预览</p>
+                <span>这里不会扫描或写入数据库，只验证 ffmpeg 输出到网页播放器的效果。</span>
+              </div>
+            )}
+          </section>
         </section>
       )}
 

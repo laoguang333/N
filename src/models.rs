@@ -67,6 +67,16 @@ pub struct BookListQuery {
     pub folder_tag: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AnimeTranscodeQuery {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnimePathRequest {
+    pub path: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ShelfResponse {
     pub items: Vec<ShelfItem>,

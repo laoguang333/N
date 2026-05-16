@@ -1,20 +1,31 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path as FsPath, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
     routing::{get, post, put},
 };
 use sqlx::{Row, SqlitePool};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     AppState,
     app_error::AppError,
     library::{read_book_content, require_book_path, scan_library},
     models::{
-        BookContent, BookListQuery, BookSummary, FolderSummary, PublicConfig, ReadingProgress,
-        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfItem, ShelfResponse,
+        AnimePathRequest, AnimeTranscodeQuery, BookContent, BookListQuery, BookSummary,
+        FolderSummary, PublicConfig, ReadingProgress, SaveProgressRequest, SaveRatingRequest,
+        ScanResult, ShelfItem, ShelfResponse,
     },
 };
 
@@ -32,6 +43,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/books/{id}/rating", put(save_rating))
         .route("/api/library/scan", post(scan))
+        .route("/api/anime/transcode", get(transcode_anime))
+        .route("/api/anime/probe", get(probe_anime))
+        .route("/api/anime/file", get(stream_anime_file))
+        .route("/api/anime/hls/prepare", post(prepare_anime_hls))
+        .route("/api/anime/hls/status", get(anime_hls_status))
+        .route(
+            "/api/anime/hls/{key}/playlist.m3u8",
+            get(anime_hls_playlist),
+        )
+        .route("/api/anime/hls/{key}/{segment}", get(anime_hls_segment))
         .with_state(state)
 }
 
@@ -55,6 +76,328 @@ async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, Ap
     )
     .await?;
     Ok(Json(result))
+}
+
+async fn transcode_anime(
+    Query(query): Query<AnimeTranscodeQuery>,
+) -> Result<Response<Body>, AppError> {
+    let path = normalize_video_path(&query.path)?;
+    let mut child = Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&path)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("0:a:0?")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-tune")
+        .arg("zerolatency")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("160k")
+        .arg("-movflags")
+        .arg("frag_keyframe+empty_moov+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg("pipe:1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::BadRequest("ffmpeg not found in PATH".to_string())
+            } else {
+                AppError::Internal(error.into())
+            }
+        })?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("failed to capture ffmpeg stdout")))?;
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    let body = Body::from_stream(ReaderStream::new(stdout));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(body)
+        .map_err(|error| AppError::Internal(error.into()))
+}
+
+fn normalize_video_path(path: &str) -> Result<PathBuf, AppError> {
+    let trimmed = path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("video path is required".to_string()));
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_file() {
+        return Err(AppError::BadRequest("video file not found".to_string()));
+    }
+
+    Ok(path)
+}
+
+async fn probe_anime(
+    Query(query): Query<AnimeTranscodeQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = normalize_video_path(&query.path)?;
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(&path)
+        .output()
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::BadRequest("ffprobe not found in PATH".to_string())
+            } else {
+                AppError::Internal(error.into())
+            }
+        })?;
+
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite());
+    Ok(Json(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "duration": duration,
+        "size": tokio::fs::metadata(&path).await?.len()
+    })))
+}
+
+async fn stream_anime_file(
+    Query(query): Query<AnimeTranscodeQuery>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let path = normalize_video_path(&query.path)?;
+    let metadata = tokio::fs::metadata(&path).await?;
+    let size = metadata.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_byte_range(value, size));
+    let (start, end) = range.unwrap_or((0, size.saturating_sub(1)));
+    let length = end.saturating_sub(start) + 1;
+    let mut file = tokio::fs::File::open(&path).await?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let body = Body::from_stream(ReaderStream::new(file.take(length)));
+
+    let mut builder = Response::builder()
+        .status(if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, content_type_for_path(&path))
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length.to_string());
+    if range.is_some() {
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+    }
+    builder
+        .body(body)
+        .map_err(|error| AppError::Internal(error.into()))
+}
+
+fn parse_byte_range(value: &str, size: u64) -> Option<(u64, u64)> {
+    let range = value.strip_prefix("bytes=")?;
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().ok()?;
+        let start = size.saturating_sub(suffix);
+        return Some((start, size.saturating_sub(1)));
+    }
+    let start = start.parse::<u64>().ok()?;
+    let end = end
+        .parse::<u64>()
+        .ok()
+        .unwrap_or_else(|| size.saturating_sub(1))
+        .min(size.saturating_sub(1));
+    (start <= end).then_some((start, end))
+}
+
+fn content_type_for_path(path: &FsPath) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("webm") => "video/webm",
+        Some("m4v") | Some("mov") | Some("mp4") => "video/mp4",
+        Some("mkv") => "video/x-matroska",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn prepare_anime_hls(
+    Json(payload): Json<AnimePathRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = normalize_video_path(&payload.path)?;
+    let key = anime_cache_key(&path).await?;
+    let dir = anime_cache_dir(&key);
+    let playlist = dir.join("playlist.m3u8");
+    let processing = dir.join(".processing");
+    tokio::fs::create_dir_all(&dir).await?;
+
+    if !playlist.exists() && !processing.exists() {
+        tokio::fs::write(&processing, b"processing").await?;
+        let processing_path = processing.clone();
+        tokio::spawn(async move {
+            let result = Command::new("ffmpeg")
+                .arg("-y")
+                .arg("-hide_banner")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-i")
+                .arg(&path)
+                .arg("-map")
+                .arg("0:v:0")
+                .arg("-map")
+                .arg("0:a:0?")
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg("160k")
+                .arg("-f")
+                .arg("hls")
+                .arg("-hls_time")
+                .arg("6")
+                .arg("-hls_playlist_type")
+                .arg("vod")
+                .arg("-hls_segment_filename")
+                .arg(dir.join("segment_%05d.ts"))
+                .arg(&playlist)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            if !matches!(result, Ok(status) if status.success()) {
+                let _ = tokio::fs::remove_file(&playlist).await;
+            }
+            let _ = tokio::fs::remove_file(processing_path).await;
+        });
+    }
+
+    Ok(Json(hls_status_payload(&key).await?))
+}
+
+async fn anime_hls_status(
+    Query(query): Query<AnimeTranscodeQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = normalize_video_path(&query.path)?;
+    let key = anime_cache_key(&path).await?;
+    Ok(Json(hls_status_payload(&key).await?))
+}
+
+async fn hls_status_payload(key: &str) -> Result<serde_json::Value, AppError> {
+    let dir = anime_cache_dir(key);
+    let playlist = dir.join("playlist.m3u8");
+    let processing = dir.join(".processing");
+    Ok(serde_json::json!({
+        "key": key,
+        "ready": playlist.exists(),
+        "processing": processing.exists(),
+        "playlist_url": format!("/api/anime/hls/{key}/playlist.m3u8")
+    }))
+}
+
+async fn anime_hls_playlist(Path(key): Path<String>) -> Result<Response<Body>, AppError> {
+    let path = anime_cache_dir(&safe_hls_key(&key)?).join("playlist.m3u8");
+    if !path.is_file() {
+        return Err(AppError::NotFound("HLS playlist not ready".to_string()));
+    }
+    let body = tokio::fs::read(path).await?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .map_err(|error| AppError::Internal(error.into()))
+}
+
+async fn anime_hls_segment(
+    Path((key, segment)): Path<(String, String)>,
+) -> Result<Response<Body>, AppError> {
+    let segment = safe_hls_segment(&segment)?;
+    let path = anime_cache_dir(&safe_hls_key(&key)?).join(segment);
+    if !path.is_file() {
+        return Err(AppError::NotFound("HLS segment not found".to_string()));
+    }
+    let body = Body::from_stream(ReaderStream::new(tokio::fs::File::open(path).await?));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp2t")
+        .body(body)
+        .map_err(|error| AppError::Internal(error.into()))
+}
+
+async fn anime_cache_key(path: &FsPath) -> Result<String, AppError> {
+    use sha2::{Digest, Sha256};
+    let metadata = tokio::fs::metadata(path).await?;
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    hasher.update(metadata.len().to_le_bytes());
+    if let Ok(modified) = metadata.modified()
+        && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+    {
+        hasher.update(duration.as_secs().to_le_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn anime_cache_dir(key: &str) -> PathBuf {
+    PathBuf::from("target").join("anime-hls").join(key)
+}
+
+fn safe_hls_key(key: &str) -> Result<String, AppError> {
+    if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(key.to_string())
+    } else {
+        Err(AppError::BadRequest("invalid HLS key".to_string()))
+    }
+}
+
+fn safe_hls_segment(segment: &str) -> Result<String, AppError> {
+    if segment.starts_with("segment_")
+        && segment.ends_with(".ts")
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+    {
+        Ok(segment.to_string())
+    } else {
+        Err(AppError::BadRequest("invalid HLS segment".to_string()))
+    }
 }
 
 async fn shelf(

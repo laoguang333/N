@@ -114,3 +114,31 @@ export function saveRating(id, rating) {
     body: JSON.stringify({ rating }),
   });
 }
+
+export function animeTranscodeUrl(path) {
+  const params = new URLSearchParams({ path });
+  return `/api/anime/transcode?${params}`;
+}
+
+export function animeFileUrl(path) {
+  const params = new URLSearchParams({ path });
+  return `/api/anime/file?${params}`;
+}
+
+export function probeAnime(path) {
+  const params = new URLSearchParams({ path });
+  return request(`/api/anime/probe?${params}`);
+}
+
+export function prepareAnimeHls(path) {
+  return request("/api/anime/hls/prepare", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function getAnimeHlsStatus(path) {
+  const params = new URLSearchParams({ path });
+  return request(`/api/anime/hls/status?${params}`);
+}
