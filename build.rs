@@ -39,8 +39,8 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn build_windows_icon(ico_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    use image::codecs::ico::{IcoEncoder, IcoFrame};
     use image::ExtendedColorType;
+    use image::codecs::ico::{IcoEncoder, IcoFrame};
     use resvg::usvg::{Options, Tree};
 
     const ICON_SIZES: &[u32] = &[16, 20, 24, 32, 40, 48, 64, 128, 256];

@@ -1,11 +1,11 @@
 # txt-reader
 
-A self-hosted web-based TXT novel reader with Rust (Axum) backend and Vue 3 (Vite) frontend.
+A self-hosted web-based TXT novel reader with Rust (Axum) backend and React (Vite) frontend.
 
 ## Project Structure
 
 ```
-frontend/          Vue 3.5 + Vite 7 SPA (JS, Composition API)
+frontend/          React 19 + Vite 7 SPA (TypeScript/JS)
 src/               Rust backend (Axum 0.8, SQLx 0.8, SQLite)
 scripts/           Python 3 orchestration (dev.py, codex.py, check.py)
 docs/              Architecture (architecture.md) and API (api.md) docs
@@ -19,6 +19,8 @@ config.toml        Runtime configuration (copy from config.example.toml)
 npm install --prefix frontend
 npm run test --prefix frontend          # Vitest unit tests (frontend/src/*.test.js)
 npx playwright test --config frontend/playwright.config.js  # E2E tests (frontend/e2e/)
+# If Playwright-managed Chromium is not installed but local Chrome is available:
+# PW_CHANNEL=chrome npm exec --prefix frontend -- playwright test --config playwright.config.js
 npm run build --prefix frontend         # Production build → frontend/dist/
 ```
 
@@ -36,15 +38,14 @@ python scripts/codex.py
 
 Always run `cargo clippy` and `npm run test --prefix frontend` after making changes. For frontend changes, also run `npx playwright test --config frontend/playwright.config.js` if UI flow is affected.
 
-## Frontend Conventions (Vue 3 + Vite)
+## Frontend Conventions (React + Vite)
 
 ### Component Architecture
-- **`<script setup>` exclusively** — never Options API, never `export default {}`.
-- State uses `reactive()` for grouped objects, `ref()` for primitives/template refs.
-- No Pinia or Vuex — all state is local reactive objects.
-- No vue-router — routing via `window.location.hash` parsed in `App.vue`.
-- Template events use kebab-case: `@click`, `@scroll.passive`.
-- Components: PascalCase filenames (`AutoScroll.vue`).
+- Function components with hooks.
+- Prefer TypeScript for new React files (`.tsx` for components, `.ts` for pure logic).
+- No Redux/Zustand unless a concrete cross-feature state problem appears; keep state local or in feature hooks.
+- No react-router currently — routing via `window.location.hash` parsed in `App.tsx`.
+- Components: PascalCase filenames (`AutoScroll.tsx`).
 
 ### API Client (`frontend/src/api.js`)
 - All HTTP calls through centralized `request(path, options)` wrapper around `fetch`.
@@ -59,13 +60,13 @@ Always run `cargo clippy` and `npm run test --prefix frontend` after making chan
 - Reading progress cached locally and synced to server.
 
 ### Virtual Scrolling
-- `@tanstack/vue-virtual` for large book content.
+- `@tanstack/react-virtual` for large book content.
 - Recalculate layout when font/spacing settings change.
-- Icons: `lucide-vue-next`.
+- Icons: `lucide-react`.
 
 ### CSS
 - Global styles in `frontend/src/styles.css`.
-- Component-local styles with `<style scoped>`.
+- Prefer shared classes and small component-level class groups over inline styling, except virtualization positioning.
 - Class naming: kebab-case, loosely BEM-inspired (`.reader-toolbar`, `.book-row`).
 
 ## Backend Conventions (Rust + Axum)
@@ -96,7 +97,7 @@ Always run `cargo clippy` and `npm run test --prefix frontend` after making chan
 
 ## Testing
 
-- **Vitest**: Pure function unit tests, co-located (`reader.test.js` next to `reader.js`).
+- **Vitest**: Pure function unit tests, co-located (`reader.test.js` next to `reader.js`, or `.test.ts` next to `.ts`).
 - **Playwright**: Browser-level E2E tests in `frontend/e2e/`.
 - **Rust**: Inline `#[cfg(test)]` modules in `src/`.
 

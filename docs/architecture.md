@@ -43,10 +43,10 @@ TXT Reader 是一个单机自托管应用，后端负责扫描本地文件、读
 
 ## 前端
 
-`frontend/src/App.vue` 负责页面状态和交互：
+`frontend/src/App.tsx` 负责顶层路由和页面组合：
 
 - Hash 路由：`#/` 为书架，`#/reader/{id}` 为阅读页。
-- 书架筛选排序直接映射到 `GET /api/books` 查询参数。
+- 书架筛选排序直接映射到 `GET /api/shelf` 查询参数。
 - 评分按钮调用 `PUT /api/books/{id}/rating`。
 - 阅读页滚动后防抖保存进度，离开页面时用 `keepalive` 尝试发送最后进度。
 
@@ -55,6 +55,11 @@ TXT Reader 是一个单机自托管应用，后端负责扫描本地文件、读
 - 阅读设置解析和边界限制。
 - TXT 段落拆分。
 - 书架尺寸和进度标签格式化。
+
+React 迁移后的辅助组件：
+
+- `frontend/src/FolderOverlay.tsx`：文件夹分组弹层、分页和评分。
+- `frontend/src/AutoScroll.tsx`：阅读页自动滚屏和速度拨盘。
 
 ## 开发脚本
 

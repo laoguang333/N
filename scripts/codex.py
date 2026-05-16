@@ -44,6 +44,7 @@ def main() -> int:
             install_frontend()
         case "start-backend":
             kill_port_listener(234)
+            build_frontend()
             run(cargo_run_command(), ROOT)
         case "dev":
             run([sys.executable, str(ROOT / "scripts" / "dev.py")], ROOT)
@@ -66,6 +67,7 @@ def build_frontend() -> None:
 
 
 def install_frontend() -> None:
+    stop_frontend_tooling_processes()
     run([require("npm"), "install"], FRONTEND)
 
 
@@ -78,8 +80,9 @@ def ensure_frontend_deps(npm: str) -> None:
 def frontend_dependencies_ready() -> bool:
     required_paths = [
         FRONTEND / "node_modules" / "vite" / "bin" / "vite.js",
-        FRONTEND / "node_modules" / "@vitejs" / "plugin-vue" / "dist" / "index.mjs",
-        FRONTEND / "node_modules" / "vue" / "dist",
+        FRONTEND / "node_modules" / "@vitejs" / "plugin-react" / "dist" / "index.js",
+        FRONTEND / "node_modules" / "react" / "index.js",
+        FRONTEND / "node_modules" / "react-dom" / "index.js",
     ]
     return all(path.exists() for path in required_paths)
 
@@ -234,6 +237,22 @@ def check_port() -> None:
         run(["netstat", "-ano"], ROOT)
     else:
         run(["sh", "-c", "lsof -nP -iTCP:234 -sTCP:LISTEN || true"], ROOT)
+
+
+def stop_frontend_tooling_processes() -> None:
+    if sys.platform != "win32":
+        return
+    frontend = str(FRONTEND)
+    command = (
+        "$frontend = '" + frontend + "'; "
+        "$procs = Get-CimInstance Win32_Process | "
+        "Where-Object { "
+        "($_.Name -in @('node.exe','esbuild.exe')) -and "
+        "($_.CommandLine -like \"*$frontend*\") "
+        "}; "
+        "foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", command], cwd=ROOT, check=False)
 
 
 def kill_port_listener(port: int) -> None:

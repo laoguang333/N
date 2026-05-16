@@ -8,6 +8,7 @@ export default defineConfig({
   },
   use: {
     baseURL: "http://127.0.0.1:5173",
+    channel: process.env.PW_CHANNEL || undefined,
     trace: "retain-on-failure",
   },
   webServer: {

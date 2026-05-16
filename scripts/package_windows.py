@@ -59,9 +59,10 @@ def main() -> int:
 
 def ensure_frontend_deps(npm: str) -> None:
     vite = FRONTEND / "node_modules" / "vite" / "bin" / "vite.js"
-    vue = FRONTEND / "node_modules" / "vue" / "dist"
-    plugin_vue = FRONTEND / "node_modules" / "@vitejs" / "plugin-vue" / "dist" / "index.mjs"
-    if vite.exists() and vue.exists() and plugin_vue.exists():
+    react = FRONTEND / "node_modules" / "react" / "index.js"
+    react_dom = FRONTEND / "node_modules" / "react-dom" / "index.js"
+    plugin_react = FRONTEND / "node_modules" / "@vitejs" / "plugin-react" / "dist" / "index.js"
+    if vite.exists() and react.exists() and react_dom.exists() and plugin_react.exists():
         return
     run([npm, "ci"], FRONTEND)
 
