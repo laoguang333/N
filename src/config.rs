@@ -13,6 +13,10 @@ pub struct Config {
     pub library_dirs: Vec<String>,
     pub scan_recursive: bool,
     pub scan_on_startup: bool,
+    pub anime_dirs: Vec<String>,
+    pub anime_scan_recursive: bool,
+    pub anime_scan_on_startup: bool,
+    pub anime_transcode_cache_dir: String,
     pub cors_allowed_origins: Option<Vec<String>>,
     pub tls_cert_path: Option<String>,
     pub tls_key_path: Option<String>,
@@ -27,6 +31,13 @@ impl Default for Config {
             library_dirs: vec![app_data.join("novels").to_string_lossy().to_string()],
             scan_recursive: false,
             scan_on_startup: false,
+            anime_dirs: vec![r"D:\will\[A]".to_string()],
+            anime_scan_recursive: true,
+            anime_scan_on_startup: false,
+            anime_transcode_cache_dir: app_data
+                .join("anime-hls")
+                .to_string_lossy()
+                .to_string(),
             cors_allowed_origins: None,
             tls_cert_path: Some(
                 app_data

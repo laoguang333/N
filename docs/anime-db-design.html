@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anime Database Design</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --text: #1f2522;
+      --muted: #67706a;
+      --line: #d9dfd8;
+      --accent: #2d7d68;
+      --accent-soft: #e3f2ec;
+      --warn: #9a5b00;
+      --warn-soft: #fff2d6;
+      --danger: #a7352a;
+      --danger-soft: #fae6e3;
+      --code: #f1f3ef;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+
+    main {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+
+    header {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 34px;
+      line-height: 1.15;
+    }
+
+    h2 {
+      margin-top: 30px;
+      margin-bottom: 14px;
+      font-size: 22px;
+    }
+
+    h3 {
+      font-size: 17px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      max-width: 760px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .overview {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .card,
+    .table-card,
+    .note {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .card {
+      display: grid;
+      gap: 6px;
+      padding: 16px;
+    }
+
+    .card strong {
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    .card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .schema {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) minmax(260px, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .table-card {
+      overflow: hidden;
+    }
+
+    .table-head {
+      display: grid;
+      gap: 4px;
+      padding: 14px 16px;
+      color: #fff;
+      background: var(--accent);
+    }
+
+    .table-head span {
+      opacity: 0.9;
+      font-size: 12px;
+    }
+
+    .fields {
+      display: grid;
+    }
+
+    .field {
+      display: grid;
+      grid-template-columns: minmax(130px, 0.95fr) minmax(120px, 0.8fr) minmax(130px, 1fr);
+      gap: 10px;
+      padding: 9px 12px;
+      border-top: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .field:first-child {
+      border-top: 0;
+    }
+
+    .field.header {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      background: #f9faf8;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: var(--code);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    .pk {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .fk {
+      color: #315c9b;
+      font-weight: 700;
+    }
+
+    .status-flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .state {
+      min-height: 104px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .state.available {
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+      background: var(--accent-soft);
+    }
+
+    .state.missing {
+      border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+      background: var(--warn-soft);
+    }
+
+    .arrow {
+      color: var(--muted);
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .relations {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .relation-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 9px;
+      border-radius: 999px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .pill.warn {
+      color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .note {
+      display: grid;
+      gap: 10px;
+      padding: 16px;
+    }
+
+    .note ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .note li + li {
+      margin-top: 6px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .sql {
+      display: block;
+      overflow-x: auto;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #26312d;
+      background: #f1f3ef;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre;
+    }
+
+    @media (max-width: 920px) {
+      .overview,
+      .schema,
+      .relations,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      .status-flow {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        transform: rotate(90deg);
+      }
+    }
+
+    @media (max-width: 620px) {
+      main {
+        padding: 22px 14px 44px;
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      .field {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Anime 模块数据库设计</h1>
+      <p class="subtitle">目标是把本机视频库做成长期可维护的索引：视频文件可以消失、移动、重新出现，但评分、观看进度和历史不应因为一次扫描而丢失。</p>
+    </header>
+
+    <section class="grid overview" aria-label="设计原则">
+      <article class="card">
+        <strong>软删除</strong>
+        <span>扫描不到文件只标记 <code>missing</code>，不物理删除记录。</span>
+      </article>
+      <article class="card">
+        <strong>观看数据独立</strong>
+        <span>进度和历史独立于文件存在状态，缺失视频仍能保留记录。</span>
+      </article>
+      <article class="card">
+        <strong>轻量扫描</strong>
+        <span>扫描只看文件系统元信息和 ffprobe 元信息，不读取完整视频。</span>
+      </article>
+      <article class="card">
+        <strong>默认可用列表</strong>
+        <span>首页默认隐藏缺失文件，历史页和缺失筛选仍可查看。</span>
+      </article>
+    </section>
+
+    <h2>表结构</h2>
+    <section class="schema" aria-label="数据库表结构">
+      <article class="table-card">
+        <div class="table-head">
+          <h3>anime_videos</h3>
+          <span>视频索引和文件状态</span>
+        </div>
+        <div class="fields">
+          <div class="field header"><span>字段</span><span>类型</span><span>用途</span></div>
+          <div class="field"><code class="pk">id</code><span>INTEGER PK</span><span>视频主键</span></div>
+          <div class="field"><code>title</code><span>TEXT</span><span>展示标题，通常来自文件名 stem</span></div>
+          <div class="field"><code>file_path</code><span>TEXT UNIQUE</span><span>当前规范化绝对路径，缺失时保留最后路径</span></div>
+          <div class="field"><code>original_file_path</code><span>TEXT NULL</span><span>首次入库路径，为后续移动识别留余地</span></div>
+          <div class="field"><code>extension</code><span>TEXT</span><span>扩展名，小写保存</span></div>
+          <div class="field"><code>folder_tag</code><span>TEXT NULL</span><span>相对库根的一级或分组目录</span></div>
+          <div class="field"><code>size</code><span>INTEGER</span><span>文件大小，用于变化检测</span></div>
+          <div class="field"><code>mtime</code><span>INTEGER</span><span>文件修改时间，用于变化检测</span></div>
+          <div class="field"><code>duration_seconds</code><span>REAL NULL</span><span>ffprobe 读取的视频时长</span></div>
+          <div class="field"><code>container</code><span>TEXT NULL</span><span>封装格式</span></div>
+          <div class="field"><code>video_codec</code><span>TEXT NULL</span><span>视频编码</span></div>
+          <div class="field"><code>audio_codec</code><span>TEXT NULL</span><span>音频编码</span></div>
+          <div class="field"><code>width / height</code><span>INTEGER NULL</span><span>分辨率</span></div>
+          <div class="field"><code>rating</code><span>INTEGER NULL</span><span>1-5 星，可清除</span></div>
+          <div class="field"><code>file_state</code><span>TEXT</span><span><code>available</code> 或 <code>missing</code></span></div>
+          <div class="field"><code>last_seen_at</code><span>TEXT</span><span>最近一次扫描确认文件存在的时间</span></div>
+          <div class="field"><code>missing_since</code><span>TEXT NULL</span><span>首次发现文件缺失的时间</span></div>
+          <div class="field"><code>missing_reason</code><span>TEXT NULL</span><span>第一版可固定为 <code>not_found</code></span></div>
+          <div class="field"><code>created_at / updated_at</code><span>TEXT</span><span>记录创建和更新时间</span></div>
+        </div>
+      </article>
+
+      <article class="table-card">
+        <div class="table-head">
+          <h3>anime_progress</h3>
+          <span>每个视频的当前观看进度</span>
+        </div>
+        <div class="fields">
+          <div class="field header"><span>字段</span><span>类型</span><span>用途</span></div>
+          <div class="field"><code class="pk fk">video_id</code><span>INTEGER PK/FK</span><span>一视频一条当前进度</span></div>
+          <div class="field"><code>position_seconds</code><span>REAL</span><span>最后播放位置</span></div>
+          <div class="field"><code>percent</code><span>REAL</span><span>播放百分比，限制在 0..1</span></div>
+          <div class="field"><code>duration_seconds</code><span>REAL NULL</span><span>保存时看到的视频总时长</span></div>
+          <div class="field"><code>version</code><span>INTEGER</span><span>进度版本，用于调试和并发覆盖判断</span></div>
+          <div class="field"><code>updated_at</code><span>TEXT</span><span>最近保存进度时间</span></div>
+        </div>
+      </article>
+
+      <article class="table-card">
+        <div class="table-head">
+          <h3>anime_watch_history</h3>
+          <span>每次观看会话记录</span>
+        </div>
+        <div class="fields">
+          <div class="field header"><span>字段</span><span>类型</span><span>用途</span></div>
+          <div class="field"><code class="pk">id</code><span>INTEGER PK</span><span>历史记录主键</span></div>
+          <div class="field"><code class="fk">video_id</code><span>INTEGER FK</span><span>关联视频</span></div>
+          <div class="field"><code>started_at</code><span>TEXT</span><span>观看开始时间</span></div>
+          <div class="field"><code>ended_at</code><span>TEXT NULL</span><span>观看结束时间</span></div>
+          <div class="field"><code>last_position_seconds</code><span>REAL</span><span>结束或离开时的位置</span></div>
+          <div class="field"><code>watched_seconds</code><span>REAL</span><span>实际播放累计时长，由前端累计</span></div>
+          <div class="field"><code>completed</code><span>INTEGER</span><span>是否看完，0/1</span></div>
+        </div>
+      </article>
+    </section>
+
+    <h2>关系图</h2>
+    <section class="relations" aria-label="表关系">
+      <div class="relation-line">
+        <span class="pill">anime_videos.id</span>
+        <span>1 : 0..1</span>
+        <span class="pill">anime_progress.video_id</span>
+        <span>当前进度</span>
+      </div>
+      <div class="relation-line">
+        <span class="pill">anime_videos.id</span>
+        <span>1 : N</span>
+        <span class="pill">anime_watch_history.video_id</span>
+        <span>观看历史</span>
+      </div>
+      <div class="relation-line">
+        <span class="pill warn">无 ON DELETE CASCADE</span>
+        <span>扫描缺失不删除视频，因此进度和历史不会被级联删掉。</span>
+      </div>
+      <div class="relation-line">
+        <span class="pill warn">物理清理延后</span>
+        <span>后续如果需要，再做显式“清理缺失记录”操作。</span>
+      </div>
+    </section>
+
+    <h2>文件状态流</h2>
+    <section class="status-flow" aria-label="文件状态流">
+      <article class="state available">
+        <h3>available</h3>
+        <p>扫描确认文件存在。首页默认展示，可播放，可更新元信息。</p>
+      </article>
+      <div class="arrow">→</div>
+      <article class="state missing">
+        <h3>missing</h3>
+        <p>扫描发现文件不在原路径。保留评分、进度、历史，首页默认隐藏。</p>
+      </article>
+      <div class="arrow">→</div>
+      <article class="state available">
+        <h3>available</h3>
+        <p>文件重新出现，清空缺失字段，计入 restored。</p>
+      </article>
+    </section>
+
+    <h2>设计思考</h2>
+    <section class="two-col">
+      <article class="note">
+        <h3>为什么不物理删除</h3>
+        <ul>
+          <li>视频库可能在移动硬盘、同步盘或临时挂载目录里，一次扫描不到不代表用户想删除记录。</li>
+          <li>观看进度和历史比文件索引更有长期价值，误删会破坏用户信任。</li>
+          <li>软删除让 UI 可以默认保持干净，同时保留恢复和人工清理空间。</li>
+        </ul>
+      </article>
+      <article class="note">
+        <h3>为什么进度和历史分开</h3>
+        <ul>
+          <li><code>anime_progress</code> 是“继续播放”所需的当前状态，每个视频最多一条。</li>
+          <li><code>anime_watch_history</code> 是行为记录，一次观看一条，用于历史页面和最近观看分析。</li>
+          <li>分开后不会为了展示历史而污染当前进度，也不会因为更新进度丢失历史细节。</li>
+        </ul>
+      </article>
+      <article class="note">
+        <h3>为什么不用完整 hash</h3>
+        <ul>
+          <li>视频文件通常很大，扫描阶段读取完整内容成本高。</li>
+          <li>第一版只需要判断“路径对应文件是否变化”，<code>size + mtime</code> 足够。</li>
+          <li>移动识别可以后续用轻量指纹增强，不阻塞主功能。</li>
+        </ul>
+      </article>
+      <article class="note">
+        <h3>为什么保留 original_file_path</h3>
+        <ul>
+          <li>它不是第一版必须使用的字段，但对后续“移动文件识别”和“显示最初来源”有用。</li>
+          <li>保留这个字段不会增加扫描成本。</li>
+          <li>如果后续确认不需要，可以不在 UI 展示。</li>
+        </ul>
+      </article>
+    </section>
+
+    <h2>核心 SQL 草案</h2>
+    <pre class="sql">CREATE TABLE anime_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL UNIQUE,
+    original_file_path TEXT,
+    extension TEXT NOT NULL,
+    folder_tag TEXT,
+    size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL,
+    duration_seconds REAL,
+    container TEXT,
+    video_codec TEXT,
+    audio_codec TEXT,
+    width INTEGER,
+    height INTEGER,
+    rating INTEGER CHECK (rating IS NULL OR (rating >= 1 AND rating <= 5)),
+    file_state TEXT NOT NULL DEFAULT 'available'
+        CHECK (file_state IN ('available', 'missing')),
+    last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    missing_since TEXT,
+    missing_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE anime_progress (
+    video_id INTEGER PRIMARY KEY,
+    position_seconds REAL NOT NULL DEFAULT 0,
+    percent REAL NOT NULL DEFAULT 0,
+    duration_seconds REAL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY(video_id) REFERENCES anime_videos(id)
+);
+
+CREATE TABLE anime_watch_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ended_at TEXT,
+    last_position_seconds REAL NOT NULL DEFAULT 0,
+    watched_seconds REAL NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(video_id) REFERENCES anime_videos(id)
+);</pre>
+  </main>
+</body>
+</html>

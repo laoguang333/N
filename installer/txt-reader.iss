@@ -1,7 +1,7 @@
 #define AppName "TXT Reader"
 #define AppExeName "txt-reader.exe"
 #ifndef AppVersion
-#define AppVersion "0.1.1"
+#define AppVersion "0.1.4"
 #endif
 #ifndef ProjectRoot
 #define ProjectRoot ".."

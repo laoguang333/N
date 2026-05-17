@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  testIgnore: process.env.PW_REAL_E2E ? [] : ["real-progress.spec.js"],
   timeout: 30_000,
   expect: {
     timeout: 5_000,

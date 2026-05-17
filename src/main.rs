@@ -4,6 +4,7 @@
 )]
 
 mod api;
+mod anime_library;
 mod app_error;
 mod app_paths;
 mod config;
@@ -23,6 +24,7 @@ use std::{
 
 use anyhow::Context;
 use api::router;
+use anime_library::scan_anime_library;
 use app_paths::config_path;
 use axum::{
     extract::Request,
@@ -103,6 +105,25 @@ async fn start_server(config: Config) -> anyhow::Result<RunningServer> {
             removed = result.removed,
             errors = result.errors.len(),
             "startup library scan complete"
+        );
+    }
+
+    if config.anime_scan_on_startup {
+        let result = scan_anime_library(
+            &db,
+            &config.anime_dirs,
+            config.anime_scan_recursive,
+            None,
+        )
+        .await;
+        tracing::info!(
+            scanned = result.scanned,
+            added = result.added,
+            updated = result.updated,
+            skipped = result.skipped,
+            marked_missing = result.marked_missing,
+            errors = result.errors.len(),
+            "startup anime scan complete"
         );
     }
 

@@ -32,9 +32,20 @@ import {
   saveRating,
   scanLibrary,
   animeFileUrl,
+  animeVideoFileUrl,
+  finishAnimeWatch,
+  getAnimeProgress,
+  getAnimeVideo,
+  getAnimeTools,
   getAnimeHlsStatus,
+  listAnimeHistory,
+  listAnimeVideos,
   prepareAnimeHls,
   probeAnime,
+  saveAnimeProgress,
+  saveAnimeRating,
+  scanAnimeLibrary,
+  startAnimeWatch,
 } from "./api";
 import {
   PROGRESS_CACHE_KEY,
@@ -51,11 +62,14 @@ const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
 const SAVE_BASE_INTERVAL = 3000;
 
-type Route = { name: "shelf"; bookId: null } | { name: "reader"; bookId: number } | { name: "tab-a"; bookId: null };
+type Route = { name: "shelf"; bookId: null } | { name: "reader"; bookId: number } | { name: "tab-a"; bookId: null } | { name: "anime"; bookId: number } | { name: "anime-history"; bookId: null };
 
 function parseRoute(): Route {
   const readerMatch = window.location.hash.match(/^#\/reader\/(\d+)/);
   if (readerMatch) return { name: "reader", bookId: Number(readerMatch[1]) };
+  const animeMatch = window.location.hash.match(/^#\/anime\/(\d+)/);
+  if (animeMatch) return { name: "anime", bookId: Number(animeMatch[1]) };
+  if (/^#\/anime\/history$/.test(window.location.hash)) return { name: "anime-history", bookId: null };
   if (/^#\/a$/.test(window.location.hash)) return { name: "tab-a", bookId: null };
   return { name: "shelf", bookId: null };
 }
@@ -90,6 +104,18 @@ function formatAnimeDuration(seconds: number) {
     return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
   }
   return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function formatAnimeProgress(progress: any) {
+  if (!progress) return "未看";
+  if (progress.percent >= 0.95) return "已看";
+  return `${Math.round(progress.percent * 100)}%`;
+}
+
+function animeCodecLabel(video: any) {
+  const resolution = video.height ? `${video.height}p` : "未知分辨率";
+  const codec = [video.video_codec, video.audio_codec].filter(Boolean).join("/") || "未知编码";
+  return `${resolution} · ${codec}`;
 }
 
 export default function App() {
@@ -134,17 +160,33 @@ export default function App() {
   const [anime, setAnime] = useState({
     path: "",
     activePath: "",
+    activeVideo: null as any,
+    videos: [] as any[],
+    history: [] as any[],
+    search: "",
+    status: "all",
+    availability: "available",
+    minRating: "",
+    sort: "recent",
+    period: "all",
     mode: "direct",
     error: "",
+    scanMessage: "",
     duration: null as number | null,
     hlsUrl: "",
     hlsStatus: "",
     loading: false,
+    scanning: false,
     playing: false,
     currentTime: 0,
     videoDuration: 0,
     playbackRate: 1,
     fullscreen: false,
+    tools: null as any,
+    historyId: null as number | null,
+    watchedSeconds: 0,
+    lastTickAt: 0,
+    ratingVideoId: null as number | null,
   });
 
   const readerRoot = useRef<HTMLElement | null>(null);
@@ -159,6 +201,7 @@ export default function App() {
   const periodicSaveTimer = useRef<number | null>(null);
   const progressFrame = useRef<number | null>(null);
   const autoScrollSaveTimer = useRef<number | null>(null);
+  const animeSaveTimer = useRef<number | null>(null);
   const autoScrollProgressUpdatedAt = useRef(0);
   const saveInFlight = useRef(false);
   const restoreSavingBlocked = useRef(false);
@@ -574,10 +617,16 @@ export default function App() {
   useEffect(() => {
     loadConfig();
     void loadBooks();
+    void getAnimeTools()
+      .then((tools) => updateAnime({ tools }))
+      .catch(() => updateAnime({ tools: { ffmpeg: null, ffprobe: null } }));
   }, []);
 
   useEffect(() => {
     if (route.name === "reader" && route.bookId) void openBook(route.bookId);
+    if (route.name === "anime" && route.bookId) void loadAnimeVideo(route.bookId);
+    if (route.name === "tab-a") void loadAnimeVideos();
+    if (route.name === "anime-history") void loadAnimeHistory();
   }, [openBook, route]);
 
   useEffect(() => {
@@ -590,6 +639,18 @@ export default function App() {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
     shelfTimer.current = window.setTimeout(loadBooks, 180);
   }, [shelf.search, shelf.status, shelf.minRating, shelf.sort]);
+
+  useEffect(() => {
+    if (route.name !== "tab-a") return;
+    const timer = window.setTimeout(loadAnimeVideos, 180);
+    return () => window.clearTimeout(timer);
+  }, [anime.search, anime.status, anime.availability, anime.minRating, anime.sort, route.name]);
+
+  useEffect(() => {
+    if (route.name !== "anime-history") return;
+    const timer = window.setTimeout(loadAnimeHistory, 180);
+    return () => window.clearTimeout(timer);
+  }, [anime.search, anime.period, route.name]);
 
   useEffect(() => {
     function flushProgress(source: any = "flush") {
@@ -723,6 +784,83 @@ export default function App() {
     void openAnime(path);
   }
 
+  const loadAnimeVideos = useCallback(async () => {
+    updateAnime({ loading: true, error: "" });
+    try {
+      const current = await new Promise<typeof anime>((resolve) => setAnime((value) => {
+        resolve(value);
+        return value;
+      }));
+      const videos = await listAnimeVideos({
+        search: current.search,
+        status: current.status,
+        availability: current.availability,
+        minRating: current.minRating,
+        sort: current.sort,
+      });
+      updateAnime({ videos, loading: false });
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, loading: false });
+    }
+  }, []);
+
+  async function runAnimeScan() {
+    if (anime.scanning) return;
+    updateAnime({ scanning: true, error: "", scanMessage: "" });
+    try {
+      const result = await scanAnimeLibrary();
+      updateAnime({
+        scanMessage: `扫描 ${result.scanned} 个 · 新增 ${result.added} · 更新 ${result.updated} · 跳过 ${result.skipped} · 缺失 ${result.marked_missing}`,
+      });
+      await loadAnimeVideos();
+      await loadConfig();
+    } catch (error) {
+      updateAnime({ error: (error as Error).message });
+    } finally {
+      updateAnime({ scanning: false });
+    }
+  }
+
+  const openAnimeVideo = useCallback((id: number) => {
+    window.location.hash = `#/anime/${id}`;
+  }, []);
+
+  const loadAnimeVideo = useCallback(async (id: number) => {
+    updateAnime({ loading: true, error: "", activeVideo: null, activePath: "", duration: null, hlsUrl: "", hlsStatus: "", historyId: null, watchedSeconds: 0 });
+    try {
+      const [video, progress] = await Promise.all([getAnimeVideo(id), getAnimeProgress(id)]);
+      updateAnime({
+        activeVideo: video,
+        activePath: video.file_path,
+        path: video.file_path,
+        duration: progress?.duration_seconds ?? video.duration_seconds ?? null,
+        currentTime: progress?.position_seconds || 0,
+        loading: false,
+      });
+      await afterNextPaint();
+      const player = animeVideoRef.current;
+      if (player && progress?.position_seconds && (progress.percent || 0) < 0.95) {
+        player.currentTime = progress.position_seconds;
+      }
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, loading: false });
+    }
+  }, []);
+
+  const loadAnimeHistory = useCallback(async () => {
+    updateAnime({ loading: true, error: "" });
+    try {
+      const current = await new Promise<typeof anime>((resolve) => setAnime((value) => {
+        resolve(value);
+        return value;
+      }));
+      const history = await listAnimeHistory({ search: current.search, period: current.period });
+      updateAnime({ history, loading: false });
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, loading: false });
+    }
+  }, []);
+
   async function openAnime(path: string) {
     updateAnime({ activePath: path, error: "", duration: null, hlsUrl: "", hlsStatus: "", loading: true });
     try {
@@ -753,6 +891,13 @@ export default function App() {
   function updateAnimePlayback() {
     const video = animeVideoRef.current;
     if (!video) return;
+    const now = Date.now();
+    if (!video.paused && anime.lastTickAt) {
+      const delta = Math.min(5, Math.max(0, (now - anime.lastTickAt) / 1000));
+      updateAnime((current) => ({ ...current, watchedSeconds: current.watchedSeconds + delta, lastTickAt: now }));
+    } else {
+      updateAnime({ lastTickAt: now });
+    }
     updateAnime({
       playing: !video.paused,
       currentTime: video.currentTime || 0,
@@ -765,9 +910,16 @@ export default function App() {
     const video = animeVideoRef.current;
     if (!video) return;
     if (video.paused) {
+      if (routeRef.current.name === "anime" && anime.activeVideo && !anime.historyId) {
+        try {
+          const started = await startAnimeWatch(anime.activeVideo.id, video.currentTime || 0);
+          updateAnime({ historyId: started.history_id, watchedSeconds: 0, lastTickAt: Date.now() });
+        } catch {}
+      }
       await video.play();
     } else {
       video.pause();
+      void saveCurrentAnimeProgress("pause");
     }
     updateAnimePlayback();
   }
@@ -778,6 +930,7 @@ export default function App() {
     const nextTime = Number(event.target.value);
     video.currentTime = nextTime;
     updateAnime({ currentTime: nextTime });
+    void saveCurrentAnimeProgress("seeked", nextTime);
   }
 
   function changeAnimeSpeed(event: React.ChangeEvent<HTMLSelectElement>) {
@@ -808,8 +961,66 @@ export default function App() {
   }
 
   function downloadAnime() {
-    if (!anime.activePath) return;
-    window.open(animeFileUrl(anime.activePath), "_blank", "noopener,noreferrer");
+    if (anime.activeVideo) {
+      window.open(animeVideoFileUrl(anime.activeVideo.id), "_blank", "noopener,noreferrer");
+    } else if (anime.activePath) {
+      window.open(animeFileUrl(anime.activePath), "_blank", "noopener,noreferrer");
+    }
+  }
+
+  async function saveCurrentAnimeProgress(source = "timeupdate", explicitTime?: number) {
+    if (routeRef.current.name !== "anime" || !anime.activeVideo) return;
+    const video = animeVideoRef.current;
+    const position = explicitTime ?? video?.currentTime ?? anime.currentTime;
+    const duration = video?.duration && Number.isFinite(video.duration) ? video.duration : anime.duration;
+    const percent = duration ? position / duration : 0;
+    try {
+      await saveAnimeProgress(anime.activeVideo.id, {
+        position_seconds: position,
+        percent,
+        duration_seconds: duration,
+        source,
+        client_id: clientId,
+        session_id: sessionId,
+      });
+    } catch {}
+  }
+
+  function scheduleAnimeProgressSave(source = "timeupdate") {
+    if (routeRef.current.name !== "anime" || !anime.activeVideo) return;
+    if (animeSaveTimer.current) window.clearTimeout(animeSaveTimer.current);
+    animeSaveTimer.current = window.setTimeout(() => void saveCurrentAnimeProgress(source), SAVE_BASE_INTERVAL);
+  }
+
+  async function finishCurrentAnimeWatch() {
+    if (!anime.historyId) return;
+    const video = animeVideoRef.current;
+    const position = video?.currentTime ?? anime.currentTime;
+    const duration = video?.duration && Number.isFinite(video.duration) ? video.duration : anime.duration;
+    const completed = Boolean(duration && (position / duration >= 0.95 || duration - position < 60));
+    try {
+      await finishAnimeWatch(anime.historyId, {
+        last_position_seconds: position,
+        watched_seconds: anime.watchedSeconds,
+        completed,
+      });
+    } catch {}
+  }
+
+  async function updateAnimeVideoRating(video: any, rating: number) {
+    const nextRating = video.rating === rating ? null : rating;
+    updateAnime({ ratingVideoId: video.id, error: "" });
+    try {
+      const updated = await saveAnimeRating(video.id, nextRating);
+      updateAnime((current) => ({
+        ...current,
+        activeVideo: current.activeVideo?.id === video.id ? updated : current.activeVideo,
+        videos: current.videos.map((item) => item.id === video.id ? updated : item),
+        ratingVideoId: null,
+      }));
+    } catch (error) {
+      updateAnime({ error: (error as Error).message, ratingVideoId: null });
+    }
   }
 
   async function updateRating(book: any, rating: number) {
@@ -871,7 +1082,7 @@ export default function App() {
   })).filter(({ item }) => Boolean(item));
 
   useEffect(() => {
-    if (route.name !== "tab-a" || anime.mode !== "hls" || !anime.activePath || anime.hlsUrl) return;
+    if ((route.name !== "tab-a" && route.name !== "anime") || anime.mode !== "hls" || !anime.activePath || anime.hlsUrl) return;
     let cancelled = false;
     const timer = window.setInterval(async () => {
       try {
@@ -895,7 +1106,7 @@ export default function App() {
   }, [anime.activePath, anime.hlsUrl, anime.mode, route.name]);
 
   useEffect(() => {
-    if (route.name !== "tab-a") return;
+    if (route.name !== "tab-a" && route.name !== "anime") return;
     const video = animeVideoRef.current;
     if (!video) return;
     let hls: { destroy: () => void } | null = null;
@@ -925,6 +1136,15 @@ export default function App() {
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (routeRef.current.name === "anime") {
+        void saveCurrentAnimeProgress("leave");
+        void finishCurrentAnimeWatch();
+      }
+    };
+  }, [route.name]);
 
   return (
     <main className={`app-shell ${themeClass}`}>
@@ -1076,114 +1296,183 @@ export default function App() {
               <p className="eyebrow">TXT Reader</p>
               <h1>Anime</h1>
             </div>
+            <div className="toolbar-actions">
+              <button className="icon-button" type="button" onClick={() => window.location.hash = "#/anime/history"} title="观看历史">
+                <Film size={22} />
+              </button>
+              <button className="icon-button" type="button" disabled={anime.scanning} onClick={runAnimeScan} title="扫描视频库">
+                {anime.scanning ? <LoaderCircle className="spin" size={22} /> : <RefreshCw size={22} />}
+              </button>
+            </div>
           </header>
-          <form className="anime-path-form" onSubmit={playAnime}>
-            <label className="anime-path-field">
-              <Film size={20} />
-              <input
-                value={anime.path}
-                onChange={(event) => updateAnime({ path: event.target.value })}
-                type="text"
-                placeholder="输入本地视频路径，例如 C:\\Videos\\demo.mkv"
-              />
-            </label>
-            <button type="submit" className="anime-play-button">
-              <Play size={18} />
-              播放
+          <div className="search-row">
+            <Search size={20} />
+            <input value={anime.search} onChange={(event) => updateAnime({ search: event.target.value })} type="search" placeholder="搜索动画、文件夹或路径" />
+          </div>
+          <div className="filter-bar">
+            <select value={anime.status} onChange={(event) => updateAnime({ status: event.target.value })} aria-label="观看状态">
+              <option value="all">全部状态</option>
+              <option value="unwatched">未看</option>
+              <option value="watching">观看中</option>
+              <option value="finished">已看</option>
+            </select>
+            <select value={anime.availability} onChange={(event) => updateAnime({ availability: event.target.value })} aria-label="文件状态">
+              <option value="available">可播放</option>
+              <option value="missing">缺失</option>
+              <option value="all">全部文件</option>
+            </select>
+            <select value={anime.minRating} onChange={(event) => updateAnime({ minRating: event.target.value })} aria-label="最低评分">
+              <option value="">全部评分</option>
+              {[5, 4, 3, 2, 1].map((rating) => <option key={rating} value={rating}>{rating} 星以上</option>)}
+            </select>
+            <select value={anime.sort} onChange={(event) => updateAnime({ sort: event.target.value })} aria-label="排序">
+              <option value="recent">最近观看</option>
+              <option value="title">标题</option>
+              <option value="progress">进度</option>
+              <option value="rating">评分</option>
+              <option value="duration">时长</option>
+              <option value="size">大小</option>
+            </select>
+          </div>
+          {anime.scanMessage && <p className="notice">{anime.scanMessage}</p>}
+          {anime.error && <p className="error">{anime.error}</p>}
+          <p className="anime-tool-status">
+            ffmpeg {anime.tools?.ffmpeg ? "已检测到" : "未检测到"} · ffprobe {anime.tools?.ffprobe ? "已检测到" : "未检测到"}
+          </p>
+          {anime.loading ? (
+            <div className="empty-state"><LoaderCircle className="spin" size={28} /></div>
+          ) : anime.videos.length === 0 ? (
+            <div className="empty-state anime-empty">
+              <Film size={34} />
+              <p>暂无视频</p>
+              <span>默认目录：{shelf.config?.anime_dirs?.join(", ") || "D:\\will\\[A]"}</span>
+              <button type="button" className="anime-play-button" onClick={runAnimeScan}>扫描视频库</button>
+            </div>
+          ) : (
+            <div className="book-list anime-list">
+              {anime.videos.map((video) => (
+                <article
+                  key={video.id}
+                  className={`book-row anime-row ${video.file_state === "missing" ? "is-missing" : ""}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => video.file_state === "available" && openAnimeVideo(video.id)}
+                  onKeyDown={(event) => {
+                    if ((event.key === "Enter" || event.key === " ") && video.file_state === "available") {
+                      event.preventDefault();
+                      openAnimeVideo(video.id);
+                    }
+                  }}
+                >
+                  <span className="book-main">
+                    <strong>{video.title}</strong>
+                    <span>{video.folder_tag || "根目录"} · {video.duration_seconds ? formatAnimeDuration(video.duration_seconds) : "未知时长"} · {animeCodecLabel(video)} · {formatSize(video.size)}</span>
+                    {video.file_state === "missing" && <span>文件已不在原位置</span>}
+                  </span>
+                  <span className="book-side">
+                    <span className="book-progress">{formatAnimeProgress(video.progress)}</span>
+                    <span className="rating-row" onClick={(event) => event.stopPropagation()}>
+                      {Array.from({ length: 5 }, (_, index) => {
+                        const rating = index + 1;
+                        return (
+                          <button key={rating} className={`star-button ${(video.rating || 0) >= rating ? "active" : ""}`} type="button" disabled={anime.ratingVideoId === video.id} onClick={() => updateAnimeVideoRating(video, rating)} title={video.rating === rating ? "清除评分" : `${rating} 星`}>
+                            <Star size={17} />
+                          </button>
+                        );
+                      })}
+                    </span>
+                  </span>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {route.name === "anime-history" && (
+        <section className="tab-a-view">
+          <header className="shelf-header">
+            <button className="icon-button" type="button" onClick={() => window.location.hash = "#/a"} title="返回 Anime">
+              <ArrowLeft size={22} />
             </button>
-          </form>
+            <div><p className="eyebrow">Anime</p><h1>观看历史</h1></div>
+          </header>
+          <div className="search-row">
+            <Search size={20} />
+            <input value={anime.search} onChange={(event) => updateAnime({ search: event.target.value })} type="search" placeholder="搜索历史" />
+          </div>
+          <div className="filter-bar">
+            <select value={anime.period} onChange={(event) => updateAnime({ period: event.target.value })} aria-label="时间范围">
+              <option value="all">全部</option>
+              <option value="today">今天</option>
+              <option value="week">本周</option>
+              <option value="month">本月</option>
+            </select>
+          </div>
+          {anime.history.map((item) => (
+            <article key={item.id} className={`book-row anime-row ${item.file_state === "missing" ? "is-missing" : ""}`} role="button" tabIndex={0} onClick={() => item.file_state === "available" && openAnimeVideo(item.video_id)}>
+              <span className="book-main">
+                <strong>{item.title}</strong>
+                <span>{new Date(item.started_at).toLocaleString()} · 观看 {formatAnimeDuration(item.watched_seconds)} · 位置 {formatAnimeDuration(item.last_position_seconds)}</span>
+                {item.file_state === "missing" && <span>文件缺失</span>}
+              </span>
+              <span className="book-side"><span className="book-progress">{item.completed ? "已看完" : "未完成"}</span></span>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {route.name === "anime" && (
+        <section className="tab-a-view">
+          <header className="shelf-header">
+            <button className="icon-button" type="button" onClick={() => window.location.hash = "#/a"} title="返回 Anime">
+              <ArrowLeft size={22} />
+            </button>
+            <div><p className="eyebrow">Anime</p><h1>{anime.activeVideo?.title || "播放"}</h1></div>
+          </header>
           <div className="anime-mode-row">
-            <button
-              type="button"
-              className={anime.mode === "direct" ? "active" : ""}
-              onClick={() => updateAnime({ mode: "direct", hlsUrl: "", hlsStatus: "" })}
-            >
-              原文件
-            </button>
-            <button
-              type="button"
-              className={anime.mode === "hls" ? "active" : ""}
-              onClick={() => {
-                updateAnime({ mode: "hls", hlsUrl: "", hlsStatus: "" });
-                if (anime.activePath) void prepareHls(anime.activePath);
-              }}
-            >
-              转码 HLS
-            </button>
+            <button type="button" className={anime.mode === "direct" ? "active" : ""} onClick={() => updateAnime({ mode: "direct", hlsUrl: "", hlsStatus: "" })}>原文件</button>
+            <button type="button" className={anime.mode === "hls" ? "active" : ""} onClick={() => {
+              updateAnime({ mode: "hls", hlsUrl: "", hlsStatus: "" });
+              if (anime.activePath) void prepareHls(anime.activePath);
+            }}>备用转码</button>
           </div>
           {anime.error && <p className="error">{anime.error}</p>}
-          {anime.duration !== null && (
-            <p className="anime-meta">时长 {formatAnimeDuration(anime.duration)} · {anime.mode === "direct" ? "浏览器 Range 播放，可拖动" : "hls.js 播放转码缓存"}</p>
-          )}
           <p className={`anime-quality ${anime.mode === "direct" ? "is-original" : "is-transcoded"}`}>
-            {anime.mode === "direct"
-              ? "画质：原文件直出，后端不重新编码；清晰度取决于浏览器解码能力和源文件本身。"
-              : "画质：HLS 转码预览，会重新编码，不保证与本地播放器完全一致。"}
+            {anime.mode === "direct" ? "原文件：不转码、不降质。" : "备用转码：重新编码，可能降质。"}
           </p>
           {anime.hlsStatus && <p className="notice">{anime.hlsStatus}</p>}
           <section className="anime-player-shell">
-            {anime.activePath ? (
-              <>
-                <div className="anime-player-frame">
-                  <video
-                    key={anime.activePath}
-                    ref={animeVideoRef}
-                    className="anime-player"
-                    playsInline
-                    src={anime.mode === "direct" ? animeFileUrl(anime.activePath) : undefined}
-                    onClick={toggleAnimePlayback}
-                    onLoadedMetadata={updateAnimePlayback}
-                    onDurationChange={updateAnimePlayback}
-                    onTimeUpdate={updateAnimePlayback}
-                    onPlay={updateAnimePlayback}
-                    onPause={updateAnimePlayback}
-                    onRateChange={updateAnimePlayback}
-                    onError={() => updateAnime({ error: "视频加载失败，请确认路径可访问且 ffmpeg 能读取该文件" })}
-                  />
-                  <div className="anime-controls">
-                    <button type="button" className="anime-control-button" onClick={toggleAnimePlayback} title={anime.playing ? "暂停" : "播放"}>
-                      {anime.playing ? <Pause size={18} /> : <Play size={18} />}
-                    </button>
-                    <span className="anime-time">{formatAnimeDuration(anime.currentTime)}</span>
-                    <input
-                      className="anime-seek"
-                      type="range"
-                      min="0"
-                      max={Math.max(1, anime.videoDuration || anime.duration || 0)}
-                      step="0.1"
-                      value={Math.min(anime.currentTime, Math.max(1, anime.videoDuration || anime.duration || 0))}
-                      aria-label="视频进度"
-                      onChange={seekAnime}
-                    />
-                    <span className="anime-time">{formatAnimeDuration(anime.videoDuration || anime.duration || 0)}</span>
-                    <select className="anime-speed-select" value={anime.playbackRate} onChange={changeAnimeSpeed} aria-label="播放速度">
-                      <option value="0.5">0.5x</option>
-                      <option value="0.75">0.75x</option>
-                      <option value="1">1x</option>
-                      <option value="1.25">1.25x</option>
-                      <option value="1.5">1.5x</option>
-                      <option value="2">2x</option>
-                    </select>
-                    <button type="button" className="anime-control-button" onClick={openAnimePictureInPicture} title="画中画">
-                      <PictureInPicture2 size={18} />
-                    </button>
-                    <button type="button" className="anime-control-button" onClick={downloadAnime} title="下载/打开原文件流">
-                      <Download size={18} />
-                    </button>
-                    <button type="button" className="anime-control-button" onClick={toggleAnimeFullscreen} title={anime.fullscreen ? "退出全屏" : "全屏"}>
-                      <Maximize size={18} />
-                    </button>
-                  </div>
-                </div>
-                <p className="anime-current-path">{anime.activePath}</p>
-              </>
-            ) : (
-              <div className="empty-state anime-empty">
-                <Film size={34} />
-                <p>实时转码预览</p>
-                <span>这里不会扫描或写入数据库，只验证 ffmpeg 输出到网页播放器的效果。</span>
+            <div className="anime-player-frame">
+              <video
+                key={`${anime.activeVideo?.id || "video"}-${anime.mode}`}
+                ref={animeVideoRef}
+                className="anime-player"
+                playsInline
+                src={anime.mode === "direct" && anime.activeVideo ? animeVideoFileUrl(anime.activeVideo.id) : undefined}
+                onClick={toggleAnimePlayback}
+                onLoadedMetadata={updateAnimePlayback}
+                onDurationChange={updateAnimePlayback}
+                onTimeUpdate={() => { updateAnimePlayback(); scheduleAnimeProgressSave("timeupdate"); }}
+                onPlay={updateAnimePlayback}
+                onPause={() => { updateAnimePlayback(); void saveCurrentAnimeProgress("pause"); }}
+                onSeeked={() => void saveCurrentAnimeProgress("seeked")}
+                onRateChange={updateAnimePlayback}
+                onError={() => updateAnime({ error: "视频加载失败，可尝试备用转码" })}
+              />
+              <div className="anime-controls">
+                <button type="button" className="anime-control-button" onClick={toggleAnimePlayback} title={anime.playing ? "暂停" : "播放"}>{anime.playing ? <Pause size={18} /> : <Play size={18} />}</button>
+                <span className="anime-time">{formatAnimeDuration(anime.currentTime)}</span>
+                <input className="anime-seek" type="range" min="0" max={Math.max(1, anime.videoDuration || anime.duration || 0)} step="0.1" value={Math.min(anime.currentTime, Math.max(1, anime.videoDuration || anime.duration || 0))} aria-label="视频进度" onChange={seekAnime} />
+                <span className="anime-time">{formatAnimeDuration(anime.videoDuration || anime.duration || 0)}</span>
+                <select className="anime-speed-select" value={anime.playbackRate} onChange={changeAnimeSpeed} aria-label="播放速度">
+                  <option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option>
+                </select>
+                <button type="button" className="anime-control-button" onClick={openAnimePictureInPicture} title="画中画"><PictureInPicture2 size={18} /></button>
+                <button type="button" className="anime-control-button" onClick={downloadAnime} title="打开原文件流"><Download size={18} /></button>
+                <button type="button" className="anime-control-button" onClick={toggleAnimeFullscreen} title={anime.fullscreen ? "退出全屏" : "全屏"}><Maximize size={18} /></button>
               </div>
-            )}
+            </div>
           </section>
         </section>
       )}
@@ -1363,10 +1652,10 @@ export default function App() {
         </section>
       )}
 
-      {route.name !== "reader" && (
+      {route.name !== "reader" && route.name !== "anime" && (
         <nav className="tab-bar">
           <button type="button" className={`tab-button ${route.name === "shelf" ? "active" : ""}`} onClick={() => switchTab("n")}>N</button>
-          <button type="button" className={`tab-button ${route.name === "tab-a" ? "active" : ""}`} onClick={() => switchTab("a")}>A</button>
+          <button type="button" className={`tab-button ${route.name === "tab-a" || route.name === "anime-history" ? "active" : ""}`} onClick={() => switchTab("a")}>A</button>
         </nav>
       )}
     </main>

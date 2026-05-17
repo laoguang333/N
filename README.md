@@ -127,6 +127,14 @@ release\txt-reader-版本号-setup.exe
 
 安装包包含 `txt-reader.exe`、`frontend/dist` 静态文件、默认 `config.toml`、空 `data` 和 `novels` 目录。升级安装会保留已有 `config.toml`、数据库和小说目录。
 
+Anime 页的备用转码功能复用本机已有的 `ffmpeg` / `ffprobe`，安装包默认不内置这两个二进制文件。程序查找顺序：
+
+1. 程序安装目录下的 `ffmpeg.exe` / `ffprobe.exe`。
+2. 程序安装目录下的 `tools\ffmpeg\bin\ffmpeg.exe` / `tools\ffmpeg\bin\ffprobe.exe`。
+3. Windows `PATH` 中的 `ffmpeg` / `ffprobe`。
+
+个人使用建议直接把现有 ffmpeg 加入系统或用户 `PATH`。原文件播放模式不需要 ffmpeg，不会重新编码；只有切换到“备用转码”时才需要 ffmpeg。
+
 如果已经手动完成构建，可以跳过构建步骤：
 
 ```powershell

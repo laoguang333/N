@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    env,
     path::{Path as FsPath, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -21,11 +22,14 @@ use tokio_util::io::ReaderStream;
 use crate::{
     AppState,
     app_error::AppError,
+    anime_library::scan_anime_library,
     library::{read_book_content, require_book_path, scan_library},
     models::{
-        AnimePathRequest, AnimeTranscodeQuery, BookContent, BookListQuery, BookSummary,
-        FolderSummary, PublicConfig, ReadingProgress, SaveProgressRequest, SaveRatingRequest,
-        ScanResult, ShelfItem, ShelfResponse,
+        AnimeHistoryQuery, AnimeListQuery, AnimePathRequest, AnimeProgress, AnimeToolsStatus,
+        AnimeTranscodeQuery, AnimeVideoSummary, AnimeWatchFinishRequest, AnimeWatchHistoryItem,
+        AnimeWatchStartRequest, AnimeWatchStartResponse, BookContent, BookListQuery, BookSummary,
+        FolderSummary, PublicConfig, ReadingProgress, SaveAnimeProgressRequest,
+        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfItem, ShelfResponse,
     },
 };
 
@@ -43,6 +47,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/books/{id}/rating", put(save_rating))
         .route("/api/library/scan", post(scan))
+        .route("/api/anime/tools", get(anime_tools))
+        .route("/api/anime/library/scan", post(scan_anime))
+        .route("/api/anime/videos", get(list_anime_videos))
+        .route("/api/anime/shelf", get(anime_shelf))
+        .route("/api/anime/videos/{id}", get(get_anime_video))
+        .route("/api/anime/videos/{id}/file", get(stream_anime_video_file))
+        .route(
+            "/api/anime/videos/{id}/progress",
+            get(get_anime_progress).put(save_anime_progress),
+        )
+        .route("/api/anime/videos/{id}/rating", put(save_anime_rating))
+        .route("/api/anime/videos/{id}/watch/start", post(start_anime_watch))
+        .route("/api/anime/watch-history/{id}/finish", put(finish_anime_watch))
+        .route("/api/anime/watch-history", get(list_anime_history))
         .route("/api/anime/transcode", get(transcode_anime))
         .route("/api/anime/probe", get(probe_anime))
         .route("/api/anime/file", get(stream_anime_file))
@@ -65,6 +83,9 @@ async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig>
         library_dirs: state.config.library_dirs.clone(),
         scan_recursive: state.config.scan_recursive,
         scan_on_startup: state.config.scan_on_startup,
+        anime_dirs: state.config.anime_dirs.clone(),
+        anime_scan_recursive: state.config.anime_scan_recursive,
+        anime_scan_on_startup: state.config.anime_scan_on_startup,
     })
 }
 
@@ -76,6 +97,226 @@ async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, Ap
     )
     .await?;
     Ok(Json(result))
+}
+
+async fn anime_tools() -> Json<AnimeToolsStatus> {
+    Json(AnimeToolsStatus {
+        ffmpeg: find_command("ffmpeg").map(|path| path.to_string_lossy().to_string()),
+        ffprobe: find_command("ffprobe").map(|path| path.to_string_lossy().to_string()),
+    })
+}
+
+async fn scan_anime(State(state): State<Arc<AppState>>) -> Json<crate::models::AnimeScanResult> {
+    Json(
+        scan_anime_library(
+            &state.db,
+            &state.config.anime_dirs,
+            state.config.anime_scan_recursive,
+            find_command("ffprobe"),
+        )
+        .await,
+    )
+}
+
+async fn list_anime_videos(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AnimeListQuery>,
+) -> Result<Json<Vec<AnimeVideoSummary>>, AppError> {
+    Ok(Json(list_anime_videos_internal(&state.db, query).await?))
+}
+
+async fn anime_shelf(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AnimeListQuery>,
+) -> Result<Json<Vec<AnimeVideoSummary>>, AppError> {
+    Ok(Json(list_anime_videos_internal(&state.db, query).await?))
+}
+
+async fn get_anime_video(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<AnimeVideoSummary>, AppError> {
+    Ok(Json(fetch_anime_video(&state.db, id).await?))
+}
+
+async fn stream_anime_video_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let video = fetch_anime_video(&state.db, id).await?;
+    if video.file_state == "missing" {
+        return Err(AppError::NotFound(
+            "video file is missing; rescan or confirm the file location".to_string(),
+        ));
+    }
+    stream_file_path(PathBuf::from(video.file_path), headers).await
+}
+
+async fn get_anime_progress(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Option<AnimeProgress>>, AppError> {
+    require_anime_video(&state.db, id).await?;
+    Ok(Json(fetch_anime_progress(&state.db, id).await?))
+}
+
+async fn save_anime_progress(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<SaveAnimeProgressRequest>,
+) -> Result<Json<AnimeProgress>, AppError> {
+    require_anime_video(&state.db, id).await?;
+    if !payload.position_seconds.is_finite()
+        || !payload.percent.is_finite()
+        || payload.duration_seconds.is_some_and(|value| !value.is_finite())
+    {
+        return Err(AppError::BadRequest("progress values must be finite".to_string()));
+    }
+    let position = payload.position_seconds.max(0.0);
+    let percent = payload.percent.clamp(0.0, 1.0);
+    let _source = payload.source.as_deref().unwrap_or("unknown");
+    let _client_id = payload.client_id.as_deref().unwrap_or("unknown");
+    let _session_id = payload.session_id.as_deref().unwrap_or("unknown");
+    sqlx::query(
+        r#"
+        INSERT INTO anime_progress (video_id, position_seconds, percent, duration_seconds, version)
+        VALUES (?1, ?2, ?3, ?4, 1)
+        ON CONFLICT(video_id) DO UPDATE SET
+            position_seconds = excluded.position_seconds,
+            percent = excluded.percent,
+            duration_seconds = excluded.duration_seconds,
+            version = anime_progress.version + 1,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        "#,
+    )
+    .bind(id)
+    .bind(position)
+    .bind(percent)
+    .bind(payload.duration_seconds)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(fetch_anime_progress(&state.db, id).await?.unwrap()))
+}
+
+async fn save_anime_rating(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<SaveRatingRequest>,
+) -> Result<Json<AnimeVideoSummary>, AppError> {
+    require_anime_video(&state.db, id).await?;
+    if let Some(rating) = payload.rating
+        && !(1..=5).contains(&rating)
+    {
+        return Err(AppError::BadRequest(
+            "rating must be between 1 and 5".to_string(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE anime_videos SET rating = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?2",
+    )
+    .bind(payload.rating)
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(fetch_anime_video(&state.db, id).await?))
+}
+
+async fn start_anime_watch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<AnimeWatchStartRequest>,
+) -> Result<Json<AnimeWatchStartResponse>, AppError> {
+    require_anime_video(&state.db, id).await?;
+    let position = payload.position_seconds.unwrap_or(0.0).max(0.0);
+    let history_id: i64 = sqlx::query_scalar(
+        "INSERT INTO anime_watch_history (video_id, last_position_seconds) VALUES (?1, ?2) RETURNING id",
+    )
+    .bind(id)
+    .bind(position)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(AnimeWatchStartResponse { history_id }))
+}
+
+async fn finish_anime_watch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<AnimeWatchFinishRequest>,
+) -> Result<StatusCode, AppError> {
+    if !payload.last_position_seconds.is_finite() || !payload.watched_seconds.is_finite() {
+        return Err(AppError::BadRequest("history values must be finite".to_string()));
+    }
+    sqlx::query(
+        r#"
+        UPDATE anime_watch_history
+        SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            last_position_seconds = ?2,
+            watched_seconds = ?3,
+            completed = ?4
+        WHERE id = ?1
+        "#,
+    )
+    .bind(id)
+    .bind(payload.last_position_seconds.max(0.0))
+    .bind(payload.watched_seconds.max(0.0))
+    .bind(if payload.completed { 1 } else { 0 })
+    .execute(&state.db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_anime_history(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AnimeHistoryQuery>,
+) -> Result<Json<Vec<AnimeWatchHistoryItem>>, AppError> {
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{value}%"));
+    let period = query.period.as_deref().unwrap_or("all");
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows = sqlx::query(
+        r#"
+        SELECT h.id, h.video_id, v.title, v.file_state, h.started_at, h.ended_at,
+               h.last_position_seconds, h.watched_seconds, h.completed
+        FROM anime_watch_history h
+        JOIN anime_videos v ON v.id = h.video_id
+        WHERE (?1 IS NULL OR v.title LIKE ?1)
+          AND (
+              ?2 = 'all'
+              OR (?2 = 'today' AND h.started_at >= datetime('now', 'start of day'))
+              OR (?2 = 'week' AND h.started_at >= datetime('now', '-7 day'))
+              OR (?2 = 'month' AND h.started_at >= datetime('now', '-30 day'))
+          )
+        ORDER BY h.started_at DESC
+        LIMIT ?3
+        "#,
+    )
+    .bind(search)
+    .bind(period)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                Ok(AnimeWatchHistoryItem {
+                    id: row.try_get("id")?,
+                    video_id: row.try_get("video_id")?,
+                    title: row.try_get("title")?,
+                    file_state: row.try_get("file_state")?,
+                    started_at: row.try_get("started_at")?,
+                    ended_at: row.try_get("ended_at")?,
+                    last_position_seconds: row.try_get("last_position_seconds")?,
+                    watched_seconds: row.try_get("watched_seconds")?,
+                    completed: row.try_get::<i64, _>("completed")? != 0,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
 }
 
 async fn transcode_anime(
@@ -157,7 +398,9 @@ async fn probe_anime(
     Query(query): Query<AnimeTranscodeQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let path = normalize_video_path(&query.path)?;
-    let output = Command::new("ffprobe")
+    let ffprobe = find_command("ffprobe")
+        .ok_or_else(|| AppError::BadRequest("ffprobe not found in PATH".to_string()))?;
+    let output = Command::new(ffprobe)
         .arg("-v")
         .arg("error")
         .arg("-show_entries")
@@ -167,13 +410,7 @@ async fn probe_anime(
         .arg(&path)
         .output()
         .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                AppError::BadRequest("ffprobe not found in PATH".to_string())
-            } else {
-                AppError::Internal(error.into())
-            }
-        })?;
+        .map_err(|error| AppError::Internal(error.into()))?;
 
     let duration = String::from_utf8_lossy(&output.stdout)
         .trim()
@@ -192,6 +429,13 @@ async fn stream_anime_file(
     headers: HeaderMap,
 ) -> Result<Response<Body>, AppError> {
     let path = normalize_video_path(&query.path)?;
+    stream_file_path(path, headers).await
+}
+
+async fn stream_file_path(path: PathBuf, headers: HeaderMap) -> Result<Response<Body>, AppError> {
+    if !path.is_file() {
+        return Err(AppError::NotFound("video file not found".to_string()));
+    }
     let metadata = tokio::fs::metadata(&path).await?;
     let size = metadata.len();
     let range = headers
@@ -219,6 +463,200 @@ async fn stream_anime_file(
     builder
         .body(body)
         .map_err(|error| AppError::Internal(error.into()))
+}
+
+async fn list_anime_videos_internal(
+    db: &SqlitePool,
+    query: AnimeListQuery,
+) -> Result<Vec<AnimeVideoSummary>, AppError> {
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{value}%"));
+    let availability = normalize_anime_availability(query.availability)?;
+    let status = normalize_anime_status(query.status)?;
+    let sort = normalize_anime_sort(query.sort)?;
+    let min_rating = normalize_min_rating(query.min_rating)?;
+    let folder_tag = query
+        .folder_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let rows = sqlx::query(
+        r#"
+        SELECT v.id, v.title, v.file_path, v.extension, v.folder_tag, v.size, v.mtime,
+               v.duration_seconds, v.container, v.video_codec, v.audio_codec, v.width, v.height,
+               v.rating, v.file_state, v.last_seen_at, v.missing_since, v.created_at, v.updated_at,
+               p.position_seconds AS progress_position_seconds,
+               p.percent AS progress_percent,
+               p.duration_seconds AS progress_duration_seconds,
+               p.updated_at AS progress_updated_at
+        FROM anime_videos v
+        LEFT JOIN anime_progress p ON p.video_id = v.id
+        WHERE (?1 IS NULL OR v.title LIKE ?1 OR v.folder_tag LIKE ?1 OR v.file_path LIKE ?1)
+          AND (?2 = 'all' OR v.file_state = ?2)
+          AND (?3 IS NULL OR v.rating >= ?3)
+          AND (?4 IS NULL OR v.folder_tag = ?4)
+          AND (
+              ?5 = 'all'
+              OR (?5 = 'unwatched' AND p.video_id IS NULL)
+              OR (?5 = 'watching' AND p.video_id IS NOT NULL AND p.percent < 0.95)
+              OR (?5 = 'finished' AND p.percent >= 0.95)
+          )
+        ORDER BY
+          CASE WHEN ?6 = 'title' THEN v.title END COLLATE NOCASE ASC,
+          CASE WHEN ?6 = 'progress' THEN COALESCE(p.percent, 0.0) END DESC,
+          CASE WHEN ?6 = 'rating' THEN COALESCE(v.rating, 0) END DESC,
+          CASE WHEN ?6 = 'duration' THEN COALESCE(v.duration_seconds, 0.0) END DESC,
+          CASE WHEN ?6 = 'size' THEN v.size END DESC,
+          CASE WHEN ?6 = 'recent' THEN COALESCE(p.updated_at, v.updated_at) END DESC,
+          v.title COLLATE NOCASE ASC
+        "#,
+    )
+    .bind(search)
+    .bind(availability)
+    .bind(min_rating)
+    .bind(folder_tag)
+    .bind(status)
+    .bind(sort)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(anime_video_from_row)
+        .collect::<Result<Vec<_>, sqlx::Error>>()?)
+}
+
+async fn fetch_anime_video(db: &SqlitePool, id: i64) -> Result<AnimeVideoSummary, AppError> {
+    let row = sqlx::query(
+        r#"
+        SELECT v.id, v.title, v.file_path, v.extension, v.folder_tag, v.size, v.mtime,
+               v.duration_seconds, v.container, v.video_codec, v.audio_codec, v.width, v.height,
+               v.rating, v.file_state, v.last_seen_at, v.missing_since, v.created_at, v.updated_at,
+               p.position_seconds AS progress_position_seconds,
+               p.percent AS progress_percent,
+               p.duration_seconds AS progress_duration_seconds,
+               p.updated_at AS progress_updated_at
+        FROM anime_videos v
+        LEFT JOIN anime_progress p ON p.video_id = v.id
+        WHERE v.id = ?1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    let row = row.ok_or_else(|| AppError::NotFound("video not found".to_string()))?;
+    Ok(anime_video_from_row(row)?)
+}
+
+async fn require_anime_video(db: &SqlitePool, id: i64) -> Result<(), AppError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM anime_videos WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    exists
+        .map(|_| ())
+        .ok_or_else(|| AppError::NotFound("video not found".to_string()))
+}
+
+async fn fetch_anime_progress(
+    db: &SqlitePool,
+    id: i64,
+) -> Result<Option<AnimeProgress>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT video_id, position_seconds, percent, duration_seconds, updated_at FROM anime_progress WHERE video_id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    row.map(anime_progress_from_row).transpose()
+}
+
+fn anime_video_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AnimeVideoSummary, sqlx::Error> {
+    let id = row.try_get("id")?;
+    let progress = match row.try_get::<Option<f64>, _>("progress_position_seconds")? {
+        Some(position_seconds) => Some(AnimeProgress {
+            video_id: id,
+            position_seconds,
+            percent: row.try_get("progress_percent")?,
+            duration_seconds: row.try_get("progress_duration_seconds")?,
+            updated_at: row.try_get("progress_updated_at")?,
+        }),
+        None => None,
+    };
+    Ok(AnimeVideoSummary {
+        id,
+        title: row.try_get("title")?,
+        file_path: row.try_get("file_path")?,
+        extension: row.try_get("extension")?,
+        folder_tag: row.try_get("folder_tag")?,
+        size: row.try_get("size")?,
+        mtime: row.try_get("mtime")?,
+        duration_seconds: row.try_get("duration_seconds")?,
+        container: row.try_get("container")?,
+        video_codec: row.try_get("video_codec")?,
+        audio_codec: row.try_get("audio_codec")?,
+        width: row.try_get("width")?,
+        height: row.try_get("height")?,
+        rating: row.try_get("rating")?,
+        file_state: row.try_get("file_state")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        missing_since: row.try_get("missing_since")?,
+        progress,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn anime_progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AnimeProgress, sqlx::Error> {
+    Ok(AnimeProgress {
+        video_id: row.try_get("video_id")?,
+        position_seconds: row.try_get("position_seconds")?,
+        percent: row.try_get("percent")?,
+        duration_seconds: row.try_get("duration_seconds")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn normalize_anime_status(status: Option<String>) -> Result<String, AppError> {
+    let status = status
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "all".to_string());
+    match status.as_str() {
+        "all" | "unwatched" | "watching" | "finished" => Ok(status),
+        _ => Err(AppError::BadRequest(
+            "status must be one of all, unwatched, watching, finished".to_string(),
+        )),
+    }
+}
+
+fn normalize_anime_availability(availability: Option<String>) -> Result<String, AppError> {
+    let availability = availability
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "available".to_string());
+    match availability.as_str() {
+        "available" | "missing" | "all" => Ok(availability),
+        _ => Err(AppError::BadRequest(
+            "availability must be one of available, missing, all".to_string(),
+        )),
+    }
+}
+
+fn normalize_anime_sort(sort: Option<String>) -> Result<String, AppError> {
+    let sort = sort
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "recent".to_string());
+    match sort.as_str() {
+        "recent" | "title" | "progress" | "rating" | "duration" | "size" => Ok(sort),
+        _ => Err(AppError::BadRequest(
+            "sort must be one of recent, title, progress, rating, duration, size".to_string(),
+        )),
+    }
 }
 
 fn parse_byte_range(value: &str, size: u64) -> Option<(u64, u64)> {
@@ -266,7 +704,11 @@ async fn prepare_anime_hls(
         tokio::fs::write(&processing, b"processing").await?;
         let processing_path = processing.clone();
         tokio::spawn(async move {
-            let result = Command::new("ffmpeg")
+            let Some(ffmpeg) = find_command("ffmpeg") else {
+                let _ = tokio::fs::remove_file(processing_path).await;
+                return;
+            };
+            let result = Command::new(ffmpeg)
                 .arg("-y")
                 .arg("-hide_banner")
                 .arg("-loglevel")
@@ -377,6 +819,28 @@ async fn anime_cache_key(path: &FsPath) -> Result<String, AppError> {
 
 fn anime_cache_dir(key: &str) -> PathBuf {
     PathBuf::from("target").join("anime-hls").join(key)
+}
+
+fn find_command(name: &str) -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) && !name.ends_with(".exe") {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        candidates.push(dir.join(&exe_name));
+        candidates.push(dir.join("tools").join("ffmpeg").join("bin").join(&exe_name));
+    }
+
+    if let Some(path_var) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path_var).map(|dir| dir.join(&exe_name)));
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn safe_hls_key(key: &str) -> Result<String, AppError> {
