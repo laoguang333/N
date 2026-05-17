@@ -188,8 +188,7 @@ h1 {
 }
 
 .anime-list {
-  position: static;
-  height: auto;
+  contain: layout style;
 }
 
 .anime-row.is-missing {

@@ -193,11 +193,14 @@ export default function App() {
   const animeVideoRef = useRef<HTMLVideoElement | null>(null);
   const searchResultsRoot = useRef<HTMLDivElement | null>(null);
   const shelfListRoot = useRef<HTMLDivElement | null>(null);
+  const animeListRoot = useRef<HTMLDivElement | null>(null);
   const [shelfScrollMargin, setShelfScrollMargin] = useState(0);
+  const [animeScrollMargin, setAnimeScrollMargin] = useState(0);
   const saveTimer = useRef<number | null>(null);
   const scrollTimer = useRef<number | null>(null);
   const shelfTimer = useRef<number | null>(null);
   const shelfMeasureFrame = useRef<number | null>(null);
+  const animeMeasureFrame = useRef<number | null>(null);
   const periodicSaveTimer = useRef<number | null>(null);
   const progressFrame = useRef<number | null>(null);
   const autoScrollSaveTimer = useRef<number | null>(null);
@@ -225,6 +228,15 @@ export default function App() {
     gap: 10,
     scrollMargin: shelfScrollMargin,
     enabled: route.name === "shelf" && shelf.items.length > 0,
+  });
+
+  const animeVirtualizer = useWindowVirtualizer({
+    count: anime.videos.length,
+    estimateSize: () => 92,
+    overscan: 10,
+    gap: 10,
+    scrollMargin: animeScrollMargin,
+    enabled: route.name === "tab-a" && anime.videos.length > 0,
   });
 
   const virtualizer = useVirtualizer({
@@ -430,6 +442,21 @@ export default function App() {
     });
   }, [shelfVirtualizer]);
 
+  const scheduleAnimeMeasure = useCallback(() => {
+    if (routeRef.current.name !== "tab-a") return;
+    if (animeMeasureFrame.current) window.cancelAnimationFrame(animeMeasureFrame.current);
+    animeMeasureFrame.current = window.requestAnimationFrame(() => {
+      animeMeasureFrame.current = null;
+      const list = animeListRoot.current;
+      if (!list) return;
+      const nextScrollMargin = list.getBoundingClientRect().top + window.scrollY;
+      setAnimeScrollMargin((current) => (
+        Math.abs(current - nextScrollMargin) > 0.5 ? nextScrollMargin : current
+      ));
+      animeVirtualizer.measure();
+    });
+  }, [animeVirtualizer]);
+
   function applyCachedProgress(books: any[]) {
     const cache = progressCache();
     return books.map((book) => ({
@@ -633,7 +660,10 @@ export default function App() {
     if (route.name === "shelf" && shelf.items.length > 0) {
       scheduleShelfMeasure();
     }
-  }, [route.name, scheduleShelfMeasure, shelf.items.length]);
+    if (route.name === "tab-a" && anime.videos.length > 0) {
+      scheduleAnimeMeasure();
+    }
+  }, [anime.videos.length, route.name, scheduleAnimeMeasure, scheduleShelfMeasure, shelf.items.length]);
 
   useEffect(() => {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
@@ -695,6 +725,7 @@ export default function App() {
     window.addEventListener("touchend", onReaderInteractionEnd, { passive: true });
     window.addEventListener("pointerup", onReaderInteractionEnd, { passive: true });
     window.addEventListener("resize", scheduleShelfMeasure, { passive: true });
+    window.addEventListener("resize", scheduleAnimeMeasure, { passive: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
     scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
     return () => {
@@ -703,14 +734,16 @@ export default function App() {
       window.removeEventListener("touchend", onReaderInteractionEnd);
       window.removeEventListener("pointerup", onReaderInteractionEnd);
       window.removeEventListener("resize", scheduleShelfMeasure);
+      window.removeEventListener("resize", scheduleAnimeMeasure);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       [saveTimer, scrollTimer, shelfTimer, periodicSaveTimer, toastTimer, searchDebounceTimer, autoScrollSaveTimer].forEach((timer) => {
         if (timer.current) window.clearTimeout(timer.current);
       });
       if (progressFrame.current) window.cancelAnimationFrame(progressFrame.current);
       if (shelfMeasureFrame.current) window.cancelAnimationFrame(shelfMeasureFrame.current);
+      if (animeMeasureFrame.current) window.cancelAnimationFrame(animeMeasureFrame.current);
     };
-  }, [canSaveReaderProgress, saveProgressInBackground, saveProgressNow, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
+  }, [canSaveReaderProgress, saveProgressInBackground, saveProgressNow, scheduleAnimeMeasure, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
 
   useEffect(() => {
     if (searchDebounceTimer.current) window.clearTimeout(searchDebounceTimer.current);
@@ -799,10 +832,11 @@ export default function App() {
         sort: current.sort,
       });
       updateAnime({ videos, loading: false });
+      window.requestAnimationFrame(scheduleAnimeMeasure);
     } catch (error) {
       updateAnime({ error: (error as Error).message, loading: false });
     }
-  }, []);
+  }, [scheduleAnimeMeasure]);
 
   async function runAnimeScan() {
     if (anime.scanning) return;
@@ -1081,6 +1115,11 @@ export default function App() {
     item: shelf.items[virtualRow.index],
   })).filter(({ item }) => Boolean(item));
 
+  const animeVirtualRows = animeVirtualizer.getVirtualItems().map((virtualRow) => ({
+    virtualRow,
+    video: anime.videos[virtualRow.index],
+  })).filter(({ video }) => Boolean(video));
+
   useEffect(() => {
     if ((route.name !== "tab-a" && route.name !== "anime") || anime.mode !== "hls" || !anime.activePath || anime.hlsUrl) return;
     let cancelled = false;
@@ -1349,13 +1388,20 @@ export default function App() {
               <button type="button" className="anime-play-button" onClick={runAnimeScan}>扫描视频库</button>
             </div>
           ) : (
-            <div className="book-list anime-list">
-              {anime.videos.map((video) => (
+            <div
+              ref={animeListRoot}
+              className="book-list anime-list"
+              style={{ height: `${animeVirtualizer.getTotalSize()}px`, position: "relative" }}
+            >
+              {animeVirtualRows.map(({ virtualRow, video }) => (
                 <article
                   key={video.id}
                   className={`book-row anime-row ${video.file_state === "missing" ? "is-missing" : ""}`}
                   role="button"
                   tabIndex={0}
+                  ref={animeVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start - animeScrollMargin}px)` }}
                   onClick={() => video.file_state === "available" && openAnimeVideo(video.id)}
                   onKeyDown={(event) => {
                     if ((event.key === "Enter" || event.key === " ") && video.file_state === "available") {
