@@ -78,6 +78,10 @@ export function getBookContent(id) {
   return request(`/api/books/${id}/content`);
 }
 
+export function bookFileUrl(id) {
+  return `/api/books/${id}/file`;
+}
+
 export function getProgress(id) {
   return request(`/api/books/${id}/progress`);
 }

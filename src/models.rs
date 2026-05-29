@@ -6,6 +6,7 @@ pub struct BookSummary {
     pub title: String,
     pub file_path: String,
     pub file_hash: String,
+    pub format: String,
     pub size: i64,
     pub mtime: i64,
     pub encoding: String,
@@ -30,6 +31,7 @@ pub struct ReadingProgress {
     pub book_id: i64,
     pub char_offset: i64,
     pub percent: f64,
+    pub locator: Option<String>,
     pub updated_at: String,
 }
 
@@ -37,6 +39,7 @@ pub struct ReadingProgress {
 pub struct SaveProgressRequest {
     pub char_offset: i64,
     pub percent: f64,
+    pub locator: Option<String>,
     pub source: Option<String>,
     pub client_id: Option<String>,
     pub session_id: Option<String>,
@@ -203,7 +206,7 @@ pub struct FolderSummary {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShelfItem {
-    Book { book: BookSummary },
+    Book { book: Box<BookSummary> },
     Folder { folder: FolderSummary },
 }
 

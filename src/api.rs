@@ -21,8 +21,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     AppState,
-    app_error::AppError,
     anime_library::scan_anime_library,
+    app_error::AppError,
     library::{read_book_content, require_book_path, scan_library},
     models::{
         AnimeHistoryQuery, AnimeListQuery, AnimePathRequest, AnimeProgress, AnimeToolsStatus,
@@ -41,6 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/books", get(list_books))
         .route("/api/books/{id}", get(get_book))
         .route("/api/books/{id}/content", get(get_book_content))
+        .route("/api/books/{id}/file", get(stream_book_file))
         .route(
             "/api/books/{id}/progress",
             get(get_progress).put(save_progress).post(save_progress),
@@ -58,8 +59,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_anime_progress).put(save_anime_progress),
         )
         .route("/api/anime/videos/{id}/rating", put(save_anime_rating))
-        .route("/api/anime/videos/{id}/watch/start", post(start_anime_watch))
-        .route("/api/anime/watch-history/{id}/finish", put(finish_anime_watch))
+        .route(
+            "/api/anime/videos/{id}/watch/start",
+            post(start_anime_watch),
+        )
+        .route(
+            "/api/anime/watch-history/{id}/finish",
+            put(finish_anime_watch),
+        )
         .route("/api/anime/watch-history", get(list_anime_history))
         .route("/api/anime/transcode", get(transcode_anime))
         .route("/api/anime/probe", get(probe_anime))
@@ -169,9 +176,13 @@ async fn save_anime_progress(
     require_anime_video(&state.db, id).await?;
     if !payload.position_seconds.is_finite()
         || !payload.percent.is_finite()
-        || payload.duration_seconds.is_some_and(|value| !value.is_finite())
+        || payload
+            .duration_seconds
+            .is_some_and(|value| !value.is_finite())
     {
-        return Err(AppError::BadRequest("progress values must be finite".to_string()));
+        return Err(AppError::BadRequest(
+            "progress values must be finite".to_string(),
+        ));
     }
     let position = payload.position_seconds.max(0.0);
     let percent = payload.percent.clamp(0.0, 1.0);
@@ -245,7 +256,9 @@ async fn finish_anime_watch(
     Json(payload): Json<AnimeWatchFinishRequest>,
 ) -> Result<StatusCode, AppError> {
     if !payload.last_position_seconds.is_finite() || !payload.watched_seconds.is_finite() {
-        return Err(AppError::BadRequest("history values must be finite".to_string()));
+        return Err(AppError::BadRequest(
+            "history values must be finite".to_string(),
+        ));
     }
     sqlx::query(
         r#"
@@ -686,6 +699,7 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
         Some("webm") => "video/webm",
         Some("m4v") | Some("mov") | Some("mp4") => "video/mp4",
         Some("mkv") => "video/x-matroska",
+        Some("epub") => "application/epub+zip",
         _ => "application/octet-stream",
     }
 }
@@ -897,7 +911,9 @@ async fn shelf(
 
     let mut items: Vec<ShelfItem> = root_books
         .into_iter()
-        .map(|book| ShelfItem::Book { book })
+        .map(|book| ShelfItem::Book {
+            book: Box::new(book),
+        })
         .collect();
     for (tag, books) in tag_books {
         let tag_matches = search
@@ -914,7 +930,7 @@ async fn shelf(
 
         if matching_books.len() == 1 {
             items.push(ShelfItem::Book {
-                book: matching_books.into_iter().next().unwrap(),
+                book: Box::new(matching_books.into_iter().next().unwrap()),
             });
         } else if !matching_books.is_empty() {
             let folder = folder_summary(tag, &matching_books);
@@ -928,7 +944,7 @@ async fn shelf(
     let mut folders = Vec::new();
     for item in &items {
         match item {
-            ShelfItem::Book { book } => books.push(book.clone()),
+            ShelfItem::Book { book } => books.push((**book).clone()),
             ShelfItem::Folder { folder } => folders.push(folder.clone()),
         }
     }
@@ -1055,12 +1071,13 @@ async fn list_books_internal(
     let rows = sqlx::query(
         r#"
         SELECT
-            b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.id, b.title, b.file_path, b.file_hash, b.format, b.size, b.mtime, b.encoding,
             b.folder_tag,
             b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
+            p.locator AS progress_locator,
             p.version AS progress_version,
             p.updated_at AS progress_updated_at
         FROM books b
@@ -1134,12 +1151,13 @@ async fn fetch_book_summary(db: &SqlitePool, id: i64) -> Result<BookSummary, App
     let row = sqlx::query(
         r#"
         SELECT
-            b.id, b.title, b.file_path, b.file_hash, b.size, b.mtime, b.encoding,
+            b.id, b.title, b.file_path, b.file_hash, b.format, b.size, b.mtime, b.encoding,
             b.folder_tag,
             b.rating,
             b.created_at, b.updated_at,
             p.char_offset AS progress_char_offset,
             p.percent AS progress_percent,
+            p.locator AS progress_locator,
             p.version AS progress_version,
             p.updated_at AS progress_updated_at
         FROM books b
@@ -1159,7 +1177,12 @@ async fn get_book_content(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<BookContent>, AppError> {
-    let (title, file_path) = require_book(&state.db, id).await?;
+    let (title, file_path, format) = require_book(&state.db, id).await?;
+    if format != "txt" {
+        return Err(AppError::BadRequest(
+            "book content endpoint is only available for txt books".to_string(),
+        ));
+    }
     let (content, encoding) = read_book_content(&file_path).await?;
     let length = content.chars().count();
 
@@ -1170,6 +1193,20 @@ async fn get_book_content(
         length,
         encoding,
     }))
+}
+
+async fn stream_book_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let (_, file_path, format) = require_book(&state.db, id).await?;
+    if format != "epub" {
+        return Err(AppError::BadRequest(
+            "book file endpoint is only available for epub books".to_string(),
+        ));
+    }
+    stream_file_path(PathBuf::from(file_path), headers).await
 }
 
 async fn get_progress(
@@ -1187,7 +1224,7 @@ async fn save_progress(
     headers: HeaderMap,
     Json(payload): Json<SaveProgressRequest>,
 ) -> Result<Json<ReadingProgress>, AppError> {
-    let (title, _) = require_book(&state.db, id).await?;
+    let (title, _, _) = require_book(&state.db, id).await?;
 
     if !payload.percent.is_finite() {
         return Err(AppError::BadRequest("percent must be finite".to_string()));
@@ -1213,6 +1250,7 @@ async fn save_progress(
             SET
                 char_offset = ?2,
                 percent = ?3,
+                locator = ?4,
                 version = version + 1,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE book_id = ?1
@@ -1221,18 +1259,20 @@ async fn save_progress(
         .bind(id)
         .bind(char_offset)
         .bind(percent)
+        .bind(payload.locator.as_deref())
         .execute(&state.db)
         .await?;
     } else {
         sqlx::query(
             r#"
-            INSERT INTO reading_progress (book_id, char_offset, percent, version)
-            VALUES (?1, ?2, ?3, 1)
+            INSERT INTO reading_progress (book_id, char_offset, percent, locator, version)
+            VALUES (?1, ?2, ?3, ?4, 1)
             "#,
         )
         .bind(id)
         .bind(char_offset)
         .bind(percent)
+        .bind(payload.locator.as_deref())
         .execute(&state.db)
         .await?;
     }
@@ -1280,7 +1320,7 @@ async fn save_rating(
     Ok(Json(fetch_book_summary(&state.db, id).await?))
 }
 
-async fn require_book(db: &SqlitePool, id: i64) -> Result<(String, String), AppError> {
+async fn require_book(db: &SqlitePool, id: i64) -> Result<(String, String, String), AppError> {
     require_book_path(db, id).await.map_err(|error| {
         if error.to_string().contains("book not found") {
             AppError::NotFound("book not found".to_string())
@@ -1297,6 +1337,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
             book_id: id,
             char_offset,
             percent: row.try_get("progress_percent")?,
+            locator: row.try_get("progress_locator")?,
             updated_at: row.try_get("progress_updated_at")?,
         }),
         None => None,
@@ -1307,6 +1348,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
         title: row.try_get("title")?,
         file_path: row.try_get("file_path")?,
         file_hash: row.try_get("file_hash")?,
+        format: row.try_get("format")?,
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
         encoding: row.try_get("encoding")?,
@@ -1323,13 +1365,14 @@ fn progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadingProgress, sq
         book_id: row.try_get("book_id")?,
         char_offset: row.try_get("char_offset")?,
         percent: row.try_get("percent")?,
+        locator: row.try_get("locator")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
 
 async fn fetch_progress(db: &SqlitePool, id: i64) -> Result<Option<ReadingProgress>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT book_id, char_offset, percent, version, updated_at FROM reading_progress WHERE book_id = ?1",
+        "SELECT book_id, char_offset, percent, locator, version, updated_at FROM reading_progress WHERE book_id = ?1",
     )
     .bind(id)
     .fetch_optional(db)
@@ -1507,6 +1550,7 @@ mod tests {
             Json(SaveProgressRequest {
                 char_offset: 100,
                 percent: 0.5,
+                locator: None,
                 source: Some("test".to_string()),
                 client_id: None,
                 session_id: None,
@@ -1524,6 +1568,7 @@ mod tests {
             Json(SaveProgressRequest {
                 char_offset: 180,
                 percent: 0.9,
+                locator: None,
                 source: Some("test".to_string()),
                 client_id: None,
                 session_id: None,
@@ -1541,6 +1586,7 @@ mod tests {
             Json(SaveProgressRequest {
                 char_offset: 0,
                 percent: 0.0,
+                locator: None,
                 source: Some("pagehide".to_string()),
                 client_id: None,
                 session_id: None,
@@ -1558,6 +1604,7 @@ mod tests {
             Json(SaveProgressRequest {
                 char_offset: 20,
                 percent: 0.0005,
+                locator: None,
                 source: Some("seek".to_string()),
                 client_id: None,
                 session_id: None,

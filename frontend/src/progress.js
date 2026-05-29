@@ -12,6 +12,7 @@ export function normalizeProgress(bookId, progress, fallback = {}) {
     book_id: progress.book_id ?? bookId,
     char_offset: Math.max(0, Number(progress.char_offset) || 0),
     percent: clampPercent(progress.percent),
+    locator: typeof progress.locator === "string" && progress.locator ? progress.locator : null,
     updated_at: progress.updated_at || fallback.updated_at || new Date().toISOString(),
     dirty: Boolean(progress.dirty ?? fallback.dirty),
   };
@@ -25,7 +26,7 @@ export function progressKey(progress) {
 }
 
 export function savePayload(progress, meta = {}) {
-  return {
+  const payload = {
     char_offset: progress.char_offset,
     percent: progress.percent,
     source: meta.source || "unknown",
@@ -33,6 +34,10 @@ export function savePayload(progress, meta = {}) {
     session_id: meta.sessionId || null,
     allow_backward: Boolean(meta.allowBackward),
   };
+  if (progress.locator) {
+    payload.locator = progress.locator;
+  }
+  return payload;
 }
 
 export function isSuspiciousLocalReset(nextProgress, previousProgress, options = {}) {

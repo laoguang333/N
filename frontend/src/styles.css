@@ -656,6 +656,97 @@ h1 {
   text-align: right;
 }
 
+.epub-shell {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.epub-stage {
+  position: absolute;
+  inset: calc(58px + env(safe-area-inset-top, 0px)) 0 0;
+}
+
+.epub-stage iframe {
+  background: var(--bg);
+}
+
+.epub-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.epub-controls {
+  position: fixed;
+  right: 14px;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 13;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 12px 34px rgb(0 0 0 / 16%);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.epub-controls.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.epub-toc {
+  position: fixed;
+  top: 74px;
+  right: 18px;
+  bottom: 18px;
+  z-index: 19;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(380px, calc(100vw - 36px));
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 16%);
+}
+
+.epub-toc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: auto;
+}
+
+.epub-toc-list button {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.epub-toc-list button:hover {
+  background: var(--surface-strong);
+}
+
 .settings-panel {
   position: fixed;
   right: 0;
@@ -1266,4 +1357,76 @@ h1 {
 
 .tab-button.active {
   color: var(--accent);
+}
+
+.tauri-test-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at top, rgba(132, 164, 255, 0.22), transparent 38%),
+    linear-gradient(160deg, #111621, #171c28 52%, #0f131b);
+  color: #edf2ff;
+}
+
+.tauri-test-card {
+  width: min(100%, 560px);
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 24px;
+  background: rgba(15, 20, 30, 0.84);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(18px);
+}
+
+.tauri-test-eyebrow {
+  margin: 0 0 12px;
+  color: #8fb0ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.tauri-test-card h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.05;
+}
+
+.tauri-test-copy {
+  margin: 14px 0 0;
+  color: rgba(237, 242, 255, 0.78);
+  line-height: 1.7;
+}
+
+.tauri-test-status {
+  margin: 16px 0 0;
+  color: #c9d7ff;
+  font-size: 14px;
+}
+
+.tauri-test-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.tauri-test-actions button {
+  min-width: 108px;
+  padding: 10px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+}
+
+.tauri-test-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

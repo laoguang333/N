@@ -34,6 +34,7 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             title TEXT NOT NULL,
             file_path TEXT NOT NULL UNIQUE,
             file_hash TEXT NOT NULL,
+            format TEXT NOT NULL DEFAULT 'txt',
             size INTEGER NOT NULL,
             mtime INTEGER NOT NULL,
             encoding TEXT NOT NULL,
@@ -82,8 +83,23 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .await?;
     }
 
+    if !column_exists(db, "books", "format").await? {
+        sqlx::query("ALTER TABLE books ADD COLUMN format TEXT NOT NULL DEFAULT 'txt';")
+            .execute(db)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_books_format ON books(format);")
+            .execute(db)
+            .await?;
+    }
+
     if !column_exists(db, "reading_progress", "version").await? {
         sqlx::query("ALTER TABLE reading_progress ADD COLUMN version INTEGER NOT NULL DEFAULT 1;")
+            .execute(db)
+            .await?;
+    }
+
+    if !column_exists(db, "reading_progress", "locator").await? {
+        sqlx::query("ALTER TABLE reading_progress ADD COLUMN locator TEXT;")
             .execute(db)
             .await?;
     }
@@ -196,8 +212,14 @@ mod tests {
         migrate(&db).await.unwrap();
 
         assert!(column_exists(&db, "books", "rating").await.unwrap());
+        assert!(column_exists(&db, "books", "format").await.unwrap());
         assert!(
             column_exists(&db, "reading_progress", "version")
+                .await
+                .unwrap()
+        );
+        assert!(
+            column_exists(&db, "reading_progress", "locator")
                 .await
                 .unwrap()
         );

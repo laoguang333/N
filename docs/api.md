@@ -41,7 +41,7 @@
 }
 ```
 
-`scanned` 表示本次遇到的 TXT 文件数。`skipped` 表示 size 和 mtime 未变化，因此未重新读取内容的文件数。
+`scanned` 表示本次遇到的 TXT/EPUB 文件数。`skipped` 表示 size 和 mtime 未变化的文件数。
 
 ## GET /api/books
 
@@ -70,6 +70,7 @@
     "title": "Book",
     "file_path": "C:\\books\\Book.txt",
     "file_hash": "sha256",
+    "format": "txt",
     "size": 1024,
     "mtime": 1760000000,
     "encoding": "UTF-8",
@@ -112,6 +113,7 @@
         "title": "Book",
         "file_path": "C:\\books\\Book.txt",
         "file_hash": "sha256",
+        "format": "txt",
         "size": 1024,
         "mtime": 1760000000,
         "encoding": "UTF-8",
@@ -136,7 +138,7 @@
 
 ## GET /api/books/{id}/content
 
-读取整本 TXT 内容。
+读取整本 TXT 内容。EPUB 使用 `GET /api/books/{id}/file` 由前端原生阅读器解析。
 
 ```json
 {
@@ -147,6 +149,10 @@
   "encoding": "UTF-8"
 }
 ```
+
+## GET /api/books/{id}/file
+
+读取 EPUB 原文件流。仅支持 `format = "epub"` 的书籍，响应 `Content-Type: application/epub+zip`，支持 HTTP Range。
 
 ## GET /api/books/{id}/progress
 
@@ -169,6 +175,12 @@
 
 ```json
 { "char_offset": 300, "percent": 0.35 }
+```
+
+EPUB 进度使用 CFI：
+
+```json
+{ "char_offset": 0, "percent": 0.35, "locator": "epubcfi(...)" }
 ```
 
 `char_offset` 小于 0 时按 0 保存；`percent` 会被限制到 `0..1`，非有限数会返回 400。

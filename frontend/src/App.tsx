@@ -23,7 +23,9 @@ import {
 } from "lucide-react";
 import {
   getBookContent,
+  bookFileUrl,
   getProgress,
+  getBook,
   getPublicConfig,
   getShelf,
   saveProgress,
@@ -57,6 +59,7 @@ import { buildParagraphOffsetMap, buildParagraphs, findParagraphIndex, formatPer
 import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 import AutoScroll from "./AutoScroll";
 import FolderOverlay from "./FolderOverlay";
+import EpubReader from "./EpubReader";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -590,9 +593,22 @@ export default function App() {
     restoreSavingBlocked.current = true;
     if (readerRoot.current) readerRoot.current.scrollTop = 0;
     try {
-      const [content, progress] = await Promise.all([getBookContent(bookId), getProgress(bookId)]);
+      const [summary, progress] = await Promise.all([getBook(bookId), getProgress(bookId)]);
       const serverProgress = normalizeProgress(bookId, progress, { dirty: false });
       const restoredProgress = serverProgress || loadCachedProgress(bookId);
+      if (summary.format === "epub") {
+        updateReader({
+          book: { ...summary, book_id: summary.id },
+          progress: restoredProgress,
+          visiblePercent: restoredProgress?.percent || 0,
+          paragraphs: [],
+          controlsVisible: window.matchMedia("(min-width: 760px)").matches,
+          loading: false,
+        });
+        restoreSavingBlocked.current = false;
+        return;
+      }
+      const content = await getBookContent(bookId);
       const paragraphs = buildParagraphs(content.content);
       searchIndex.current = buildSearchIndex(paragraphs);
       paraOffsetMap.current = buildParagraphOffsetMap(paragraphs);
@@ -617,6 +633,28 @@ export default function App() {
       restoreSavingBlocked.current = false;
     }
   }, [scheduleProgressSave, updateVisibleProgress]);
+
+  const saveEpubProgress = useCallback(async (nextProgress: { percent: number; locator: string | null }) => {
+    const currentReader = readerRef.current;
+    if (!currentReader.book) return;
+    const progress = cacheProgress(currentReader.book.book_id, {
+      book_id: currentReader.book.book_id,
+      char_offset: 0,
+      percent: nextProgress.percent,
+      locator: nextProgress.locator,
+    }, { dirty: true });
+    updateReader({ progress, visiblePercent: progress?.percent || 0 });
+    if (!progress) return;
+    try {
+      const saved = await saveProgress(
+        currentReader.book.book_id,
+        savePayload(progress, progressMeta("epub_relocated")),
+      );
+      applySavedProgress(saved);
+    } catch {
+      showToast("保存 EPUB 进度失败");
+    }
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
@@ -1286,7 +1324,7 @@ export default function App() {
                 >
                   <span className="book-main">
                     <strong>{item.title}</strong>
-                    <span>{formatSize(item.size)} · {item.encoding}</span>
+                    <span>{(item.format || "txt").toUpperCase()} · {formatSize(item.size)} · {item.encoding}</span>
                   </span>
                   <span className="book-side">
                     <span className="book-progress">{formatPercent(item.progress)}</span>
@@ -1533,9 +1571,11 @@ export default function App() {
               <strong>{reader.book?.title || "Reading"}</strong>
             </div>
             <div className="toolbar-actions">
-              <button className="icon-button" type="button" onClick={() => updateReader({ searchOpen: !reader.searchOpen, controlsVisible: true })} title="Search">
-                <Search size={22} />
-              </button>
+              {reader.book?.format !== "epub" && (
+                <button className="icon-button" type="button" onClick={() => updateReader({ searchOpen: !reader.searchOpen, controlsVisible: true })} title="Search">
+                  <Search size={22} />
+                </button>
+              )}
               <button className="icon-button" type="button" onClick={() => updateReader({ settingsOpen: true })} title="Settings">
                 <Settings size={22} />
               </button>
@@ -1551,7 +1591,18 @@ export default function App() {
           {reader.error && <p className="error reader-error">{reader.error}</p>}
           {reader.loading && <div className="empty-state reader-loading"><LoaderCircle className="spin" size={30} /></div>}
 
-          {reader.book && (
+          {reader.book?.format === "epub" && (
+            <EpubReader
+              url={bookFileUrl(reader.book.book_id)}
+              progress={reader.progress}
+              settings={settings}
+              controlsVisible={reader.controlsVisible}
+              onControlsVisibleChange={(controlsVisible) => updateReader({ controlsVisible })}
+              onProgress={saveEpubProgress}
+            />
+          )}
+
+          {reader.book && reader.book.format !== "epub" && (
             <article
               ref={readerRoot}
               className={`reader-content ${reader.loading ? "is-restoring" : ""}`}
@@ -1602,7 +1653,7 @@ export default function App() {
             </article>
           )}
 
-          {reader.book && !reader.loading && (
+          {reader.book && reader.book.format !== "epub" && !reader.loading && (
             <div className={`reader-progress ${reader.controlsVisible || reader.progressSeeking ? "is-visible" : ""}`}>
               <input
                 type="range"
@@ -1621,13 +1672,15 @@ export default function App() {
             </div>
           )}
 
-          <AutoScroll
-            playing={reader.autoScrollPlaying}
-            speed={reader.autoScrollSpeed}
-            scrollElement={readerRoot.current}
-            onPlayingChange={(autoScrollPlaying) => updateReader({ autoScrollPlaying })}
-            onSpeedChange={(autoScrollSpeed) => updateReader({ autoScrollSpeed })}
-          />
+          {reader.book?.format !== "epub" && (
+            <AutoScroll
+              playing={reader.autoScrollPlaying}
+              speed={reader.autoScrollSpeed}
+              scrollElement={readerRoot.current}
+              onPlayingChange={(autoScrollPlaying) => updateReader({ autoScrollPlaying })}
+              onSpeedChange={(autoScrollSpeed) => updateReader({ autoScrollSpeed })}
+            />
+          )}
 
           {reader.settingsOpen && (
             <aside className="settings-panel">
@@ -1663,7 +1716,7 @@ export default function App() {
             </aside>
           )}
 
-          {reader.searchOpen && (
+          {reader.searchOpen && reader.book?.format !== "epub" && (
             <aside className="search-panel">
               <div className="search-panel-header">
                 <strong>Search</strong>

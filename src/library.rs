@@ -7,9 +7,8 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use chardetng::EncodingDetector;
-use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
-use tokio::{fs, io::AsyncReadExt, task::JoinSet};
+use tokio::{fs, io::AsyncReadExt};
 
 use zhconv::{Variant, zhconv};
 
@@ -18,7 +17,7 @@ use crate::models::ScanResult;
 #[derive(Debug)]
 struct ExistingBook {
     id: i64,
-    file_path: String,
+    file_hash: String,
     size: i64,
     mtime: i64,
 }
@@ -28,6 +27,7 @@ struct ScannedBookFile {
     title: String,
     file_path: String,
     file_hash: String,
+    format: String,
     size: i64,
     mtime: i64,
     encoding: String,
@@ -63,9 +63,9 @@ pub async fn scan_library(
             continue;
         }
 
-        tracing::info!(dir = %dir_path.display(), "collecting .txt files");
+        tracing::info!(dir = %dir_path.display(), "collecting book files");
 
-        let files = match collect_txt_files(&dir_path, recursive).await {
+        let files = match collect_book_files(&dir_path, recursive).await {
             Ok(files) => files,
             Err(error) => {
                 result.errors.push(error.to_string());
@@ -73,15 +73,13 @@ pub async fn scan_library(
             }
         };
 
-        tracing::info!(count = files.len(), dir = %dir_path.display(), "found .txt files");
-
-        let mut pending = Vec::with_capacity(files.len());
+        tracing::info!(count = files.len(), dir = %dir_path.display(), "found book files");
 
         for path in files {
             result.scanned += 1;
 
-            let step = match prepare_scan_file(db, &path, &library_roots).await {
-                Ok(step) => step,
+            let scanned = match prepare_scan_file(db, &path, &library_roots).await {
+                Ok(scanned) => scanned,
                 Err(error) => {
                     result
                         .errors
@@ -90,13 +88,15 @@ pub async fn scan_library(
                 }
             };
 
-            match step {
-                FileScanStep::Skip(seen_path) => {
-                    seen_paths.insert(seen_path);
-                    result.skipped += 1;
-                }
-                FileScanStep::Process(pending_file) => {
-                    pending.push(pending_file);
+            seen_paths.insert(scanned.file_path.clone());
+            match apply_scan_result(db, &scanned).await {
+                Ok(BookScanOutcome::Skipped) => result.skipped += 1,
+                Ok(BookScanOutcome::Added) => result.added += 1,
+                Ok(BookScanOutcome::Updated) => result.updated += 1,
+                Err(error) => {
+                    result
+                        .errors
+                        .push(format!("failed to scan {}: {error:#}", path.display()));
                 }
             }
 
@@ -106,39 +106,8 @@ pub async fn scan_library(
                     added = result.added,
                     updated = result.updated,
                     skipped = result.skipped,
-                    pending = pending.len(),
                     "scan progress"
                 );
-            }
-        }
-
-        let sem = Arc::new(tokio::sync::Semaphore::new(8));
-        let mut tasks = JoinSet::new();
-
-        for pf in pending {
-            let sem = sem.clone();
-            tasks.spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                read_pending_content(pf).await
-            });
-        }
-
-        while let Some(task_result) = tasks.join_next().await {
-            match task_result? {
-                Ok((pf, content)) => {
-                    match apply_scan_result(db, &pf, &content, &mut seen_paths).await {
-                        Ok(outcome) => match outcome {
-                            BookScanOutcome::Added => result.added += 1,
-                            BookScanOutcome::Updated => result.updated += 1,
-                        },
-                        Err(error) => result
-                            .errors
-                            .push(format!("failed to scan {}: {error:#}", pf.path.display())),
-                    }
-                }
-                Err(error) => {
-                    result.errors.push(error.to_string());
-                }
             }
         }
     }
@@ -166,31 +135,11 @@ pub async fn scan_library(
     Ok(result)
 }
 
-struct PendingFile {
-    path: PathBuf,
-    file_path: String,
-    size: i64,
-    mtime: i64,
-    folder_tag: Option<String>,
-    title: String,
-    existing_id: Option<i64>,
-}
-
-struct FileContent {
-    file_hash: String,
-    encoding: String,
-}
-
-enum FileScanStep {
-    Skip(String),
-    Process(PendingFile),
-}
-
 async fn prepare_scan_file(
     db: &SqlitePool,
     path: &Path,
     library_roots: &[PathBuf],
-) -> anyhow::Result<FileScanStep> {
+) -> anyhow::Result<ScannedBookFile> {
     let metadata = fs::metadata(path).await?;
     let canonical_path = path.canonicalize()?;
     let file_path = canonical_path.to_string_lossy().to_string();
@@ -202,79 +151,48 @@ async fn prepare_scan_file(
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default();
     let folder_tag = compute_folder_tag(&file_path, library_roots);
+    let format = book_format(path)?;
+    let encoding = if format == "txt" { "TEXT" } else { "EPUB" }.to_string();
 
-    if let Some(existing) = existing_book_by_path(db, &file_path).await? {
-        if existing.size == size && existing.mtime == mtime {
-            return Ok(FileScanStep::Skip(file_path));
-        }
-        return Ok(FileScanStep::Process(PendingFile {
-            path: path.to_path_buf(),
-            file_path,
-            size,
-            mtime,
-            folder_tag,
-            title: title_from_path(path),
-            existing_id: Some(existing.id),
-        }));
-    }
+    let file_hash = existing_book_by_path(db, &file_path)
+        .await?
+        .map(|existing| existing.file_hash)
+        .unwrap_or_default();
 
-    Ok(FileScanStep::Process(PendingFile {
-        path: path.to_path_buf(),
+    Ok(ScannedBookFile {
+        title: title_from_path(path),
         file_path,
+        file_hash,
+        format,
         size,
         mtime,
+        encoding,
         folder_tag,
-        title: title_from_path(path),
-        existing_id: None,
-    }))
-}
-
-async fn read_pending_content(pf: PendingFile) -> anyhow::Result<(PendingFile, FileContent)> {
-    let bytes = read_all(&pf.path).await?;
-    let content = FileContent {
-        file_hash: sha256_hex(&bytes),
-        encoding: detect_encoding(&bytes).name().to_string(),
-    };
-    Ok((pf, content))
+    })
 }
 
 async fn apply_scan_result(
     db: &SqlitePool,
-    pf: &PendingFile,
-    content: &FileContent,
-    seen_paths: &mut HashSet<String>,
+    scanned: &ScannedBookFile,
 ) -> anyhow::Result<BookScanOutcome> {
-    let scanned = ScannedBookFile {
-        title: pf.title.clone(),
-        file_path: pf.file_path.clone(),
-        file_hash: content.file_hash.clone(),
-        size: pf.size,
-        mtime: pf.mtime,
-        encoding: content.encoding.clone(),
-        folder_tag: pf.folder_tag.clone(),
-    };
-
-    if let Some(id) = pf.existing_id {
-        update_book(db, id, &scanned).await?;
-        seen_paths.insert(scanned.file_path);
-        return Ok(BookScanOutcome::Updated);
-    }
-
-    if let Some(existing) = moved_book_by_hash(db, &scanned.file_hash, &scanned.file_path).await? {
-        update_book(db, existing.id, &scanned).await?;
-        seen_paths.insert(scanned.file_path);
+    if let Some(existing) = existing_book_by_path(db, &scanned.file_path).await? {
+        if existing.size == scanned.size && existing.mtime == scanned.mtime {
+            return Ok(BookScanOutcome::Skipped);
+        }
+        update_book(db, existing.id, scanned).await?;
         return Ok(BookScanOutcome::Updated);
     }
 
     sqlx::query(
         r#"
-        INSERT INTO books (title, file_path, file_hash, size, mtime, encoding, folder_tag)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO books (title, file_path, file_hash, format, size, mtime, encoding, folder_tag)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         "#,
     )
     .bind(&scanned.title)
     .bind(&scanned.file_path)
     .bind(&scanned.file_hash)
+    .bind(&scanned.format)
     .bind(scanned.size)
     .bind(scanned.mtime)
     .bind(&scanned.encoding)
@@ -282,17 +200,17 @@ async fn apply_scan_result(
     .execute(db)
     .await?;
 
-    seen_paths.insert(scanned.file_path);
     Ok(BookScanOutcome::Added)
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum BookScanOutcome {
+    Skipped,
     Added,
     Updated,
 }
 
-async fn collect_txt_files(root: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+async fn collect_book_files(root: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
 
@@ -305,7 +223,7 @@ async fn collect_txt_files(root: &Path, recursive: bool) -> anyhow::Result<Vec<P
             let path = entry.path();
             let metadata = entry.metadata().await?;
 
-            if metadata.is_file() && is_txt_file(&path) {
+            if metadata.is_file() && is_supported_book_file(&path) {
                 files.push(path);
             } else if recursive && metadata.is_dir() {
                 dirs.push(path);
@@ -326,41 +244,19 @@ async fn existing_book_by_path(
     db: &SqlitePool,
     file_path: &str,
 ) -> anyhow::Result<Option<ExistingBook>> {
-    let row = sqlx::query("SELECT id, file_path, size, mtime FROM books WHERE file_path = ?1")
-        .bind(file_path)
-        .fetch_optional(db)
-        .await?;
+    let row =
+        sqlx::query("SELECT id, file_path, file_hash, size, mtime FROM books WHERE file_path = ?1")
+            .bind(file_path)
+            .fetch_optional(db)
+            .await?;
 
     Ok(row.map(existing_book_from_row).transpose()?)
-}
-
-async fn moved_book_by_hash(
-    db: &SqlitePool,
-    file_hash: &str,
-    current_path: &str,
-) -> anyhow::Result<Option<ExistingBook>> {
-    let rows = sqlx::query(
-        "SELECT id, file_path, size, mtime FROM books WHERE file_hash = ?1 AND file_path <> ?2",
-    )
-    .bind(file_hash)
-    .bind(current_path)
-    .fetch_all(db)
-    .await?;
-
-    for row in rows {
-        let book = existing_book_from_row(row)?;
-        if !Path::new(&book.file_path).exists() {
-            return Ok(Some(book));
-        }
-    }
-
-    Ok(None)
 }
 
 fn existing_book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ExistingBook, sqlx::Error> {
     Ok(ExistingBook {
         id: row.try_get("id")?,
-        file_path: row.try_get("file_path")?,
+        file_hash: row.try_get("file_hash")?,
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
     })
@@ -373,17 +269,19 @@ async fn update_book(db: &SqlitePool, id: i64, scanned: &ScannedBookFile) -> any
         SET title = ?1,
             file_path = ?2,
             file_hash = ?3,
-            size = ?4,
-            mtime = ?5,
-            encoding = ?6,
-            folder_tag = ?7,
+            format = ?4,
+            size = ?5,
+            mtime = ?6,
+            encoding = ?7,
+            folder_tag = ?8,
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE id = ?8
+        WHERE id = ?9
         "#,
     )
     .bind(&scanned.title)
     .bind(&scanned.file_path)
     .bind(&scanned.file_hash)
+    .bind(&scanned.format)
     .bind(scanned.size)
     .bind(scanned.mtime)
     .bind(&scanned.encoding)
@@ -467,7 +365,7 @@ fn canonical_library_roots(library_dirs: &[String]) -> anyhow::Result<Vec<PathBu
 }
 
 fn is_top_level_library_file(path: &Path, roots: &[PathBuf]) -> bool {
-    if !is_txt_file(path) {
+    if !is_supported_book_file(path) {
         return false;
     }
 
@@ -478,7 +376,7 @@ fn is_top_level_library_file(path: &Path, roots: &[PathBuf]) -> bool {
 
 fn is_library_file(path: &Path, roots: &[PathBuf], recursive: bool) -> bool {
     if recursive {
-        is_txt_file(path) && roots.iter().any(|root| is_under_root(path, root))
+        is_supported_book_file(path) && roots.iter().any(|root| is_under_root(path, root))
     } else {
         is_top_level_library_file(path, roots)
     }
@@ -502,11 +400,20 @@ fn same_path(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
-fn is_txt_file(path: &Path) -> bool {
+fn is_supported_book_file(path: &Path) -> bool {
+    book_format(path).is_ok()
+}
+
+fn book_format(path: &Path) -> anyhow::Result<String> {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("txt"))
-        .unwrap_or(false)
+        .map(|ext| ext.to_ascii_lowercase())
+        .and_then(|ext| match ext.as_str() {
+            "txt" => Some("txt".to_string()),
+            "epub" => Some("epub".to_string()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("unsupported book file extension"))
 }
 
 async fn read_all(path: &Path) -> anyhow::Result<Vec<u8>> {
@@ -524,24 +431,21 @@ fn detect_encoding(bytes: &[u8]) -> &'static encoding_rs::Encoding {
     detector.guess(Some(b"zh"), true)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
-pub async fn require_book_path(db: &SqlitePool, id: i64) -> anyhow::Result<(String, String)> {
-    let row = sqlx::query("SELECT title, file_path FROM books WHERE id = ?1")
+pub async fn require_book_path(
+    db: &SqlitePool,
+    id: i64,
+) -> anyhow::Result<(String, String, String)> {
+    let row = sqlx::query("SELECT title, file_path, format FROM books WHERE id = ?1")
         .bind(id)
         .fetch_optional(db)
         .await?;
 
     let row = row.ok_or_else(|| anyhow!("book not found"))?;
-    Ok((row.try_get("title")?, row.try_get("file_path")?))
+    Ok((
+        row.try_get("title")?,
+        row.try_get("file_path")?,
+        row.try_get("format")?,
+    ))
 }
 
 #[cfg(test)]
@@ -618,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moved_file_keeps_existing_book_and_progress() {
+    async fn moved_file_is_treated_as_a_new_book_without_hash_matching() {
         let fixture = TestFixture::new("scan-move").await;
         let old_path = fixture.library.join("Old.txt");
         let new_path = fixture.library.join("New.txt");
@@ -643,22 +547,44 @@ mod tests {
         let result = scan_library(&fixture.db, &[fixture.library_dir()], false)
             .await
             .unwrap();
-        assert_eq!(result.updated, 1);
-        assert_eq!(result.removed, 0);
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 1);
 
-        let moved_id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'New'")
+        let new_id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'New'")
             .fetch_one(&fixture.db)
             .await
             .unwrap();
-        assert_eq!(id, moved_id);
+        assert_ne!(id, new_id);
 
-        let char_offset: i64 =
+        let old_progress: Option<i64> =
             sqlx::query_scalar("SELECT char_offset FROM reading_progress WHERE book_id = ?1")
                 .bind(id)
-                .fetch_one(&fixture.db)
+                .fetch_optional(&fixture.db)
                 .await
                 .unwrap();
-        assert_eq!(char_offset, 4);
+        assert!(old_progress.is_none());
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn scan_includes_epub_files() {
+        let fixture = TestFixture::new("scan-epub").await;
+        fs::write(fixture.library.join("Book.epub"), b"not a real epub")
+            .await
+            .unwrap();
+
+        let result = scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        assert_eq!(result.scanned, 1);
+        assert_eq!(result.added, 1);
+
+        let format: String = sqlx::query_scalar("SELECT format FROM books WHERE title = 'Book'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        assert_eq!(format, "epub");
 
         fixture.cleanup().await;
     }
