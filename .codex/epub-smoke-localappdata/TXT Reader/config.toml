@@ -1,0 +1,7 @@
+listen = "127.0.0.1:12345"
+database_path = "C:\\Users\\nillouise\\Music\\rust\\N\\.codex\\epub-smoke-localappdata\\TXT Reader\\reader.sqlite"
+library_dirs = ["E:\\Videos\\小说"]
+scan_recursive = true
+scan_on_startup = false
+tls_cert_path = "C:\\Users\\nillouise\\Music\\rust\\N\\certs\\server-cert.pem"
+tls_key_path = "C:\\Users\\nillouise\\Music\\rust\\N\\certs\\server-key.pem"
