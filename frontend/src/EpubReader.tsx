@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import ePub from "epubjs";
 import { ArrowLeft, ArrowRight, List, LoaderCircle } from "lucide-react";
 
+import {
+  epubProgressFromLocation,
+  resolveEpubTocHref,
+  type EpubTocItem,
+} from "./epub";
+
 type EpubReaderProps = {
   url: string;
   progress: any;
@@ -15,6 +21,26 @@ type EpubReaderProps = {
   onProgress: (progress: { percent: number; locator: string | null }) => void;
 };
 
+type EpubTocItemsProps = {
+  items: EpubTocItem[];
+  onSelect: (href: string) => void;
+};
+
+function EpubTocItems({ items, onSelect }: EpubTocItemsProps) {
+  return items.map((item) => (
+    <div className="epub-toc-group" key={item.id || item.href || item.label}>
+      {item.href && (
+        <button type="button" onClick={() => onSelect(item.href!)}>
+          {item.label || item.href}
+        </button>
+      )}
+      {item.subitems && item.subitems.length > 0 && (
+        <EpubTocItems items={item.subitems} onSelect={onSelect} />
+      )}
+    </div>
+  ));
+}
+
 export default function EpubReader({
   url,
   progress,
@@ -27,14 +53,27 @@ export default function EpubReader({
   const bookRef = useRef<any>(null);
   const renditionRef = useRef<any>(null);
   const saveTimer = useRef<number | null>(null);
+  const onProgressRef = useRef(onProgress);
+  const controlsVisibleRef = useRef(controlsVisible);
+  const onControlsVisibleChangeRef = useRef(onControlsVisibleChange);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [tocOpen, setTocOpen] = useState(false);
-  const [toc, setToc] = useState<any[]>([]);
+  const [toc, setToc] = useState<EpubTocItem[]>([]);
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
+
+  useEffect(() => {
+    controlsVisibleRef.current = controlsVisible;
+    onControlsVisibleChangeRef.current = onControlsVisibleChange;
+  }, [controlsVisible, onControlsVisibleChange]);
 
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
+    let disposed = false;
 
     root.innerHTML = "";
     setLoading(true);
@@ -52,6 +91,11 @@ export default function EpubReader({
     });
     bookRef.current = book;
     renditionRef.current = rendition;
+    rendition.hooks.content.register((contents: any) => {
+      contents.document.addEventListener("click", () => {
+        onControlsVisibleChangeRef.current(!controlsVisibleRef.current);
+      });
+    });
 
     rendition.themes.register("paper", {
       body: {
@@ -82,26 +126,24 @@ export default function EpubReader({
     rendition.themes.select(settings.theme === "night" ? "night" : "paper");
     rendition.themes.fontSize(`${settings.fontSize}px`);
 
+    function reportProgress(location: any) {
+      const nextProgress = epubProgressFromLocation(book.locations, location);
+      if (!nextProgress || disposed) return;
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      saveTimer.current = window.setTimeout(() => {
+        onProgressRef.current(nextProgress);
+      }, 350);
+    }
+
     book.ready
       .then(() => book.locations.generate(1200))
+      .then(() => reportProgress(rendition.currentLocation()))
       .catch(() => undefined);
     book.loaded.navigation
       .then((navigation: any) => setToc(navigation?.toc || []))
       .catch(() => setToc([]));
 
-    rendition.on("relocated", (location: any) => {
-      const cfi = location?.start?.cfi || null;
-      let percent = 0;
-      if (cfi && book.locations?.length?.()) {
-        percent = book.locations.percentageFromCfi(cfi) || 0;
-      } else if (Number.isFinite(location?.start?.percentage)) {
-        percent = location.start.percentage;
-      }
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        onProgress({ percent: Math.min(1, Math.max(0, percent)), locator: cfi });
-      }, 350);
-    });
+    rendition.on("relocated", reportProgress);
 
     rendition
       .display(progress?.locator || undefined)
@@ -112,6 +154,7 @@ export default function EpubReader({
       });
 
     return () => {
+      disposed = true;
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       rendition.destroy();
       book.destroy();
@@ -137,8 +180,18 @@ export default function EpubReader({
   }
 
   function displayHref(href: string) {
-    setTocOpen(false);
-    void renditionRef.current?.display(href);
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    const target = resolveEpubTocHref(bookRef.current, href);
+    void rendition
+      .display(target)
+      .then(() => {
+        setError("");
+        setTocOpen(false);
+      })
+      .catch((err: Error) => {
+        setError(err.message || "EPUB 章节加载失败");
+      });
   }
 
   return (
@@ -172,11 +225,7 @@ export default function EpubReader({
             {toc.length === 0 ? (
               <span>无目录</span>
             ) : (
-              toc.map((item) => (
-                <button key={item.id || item.href || item.label} type="button" onClick={() => displayHref(item.href)}>
-                  {item.label || item.href}
-                </button>
-              ))
+              <EpubTocItems items={toc} onSelect={displayHref} />
             )}
           </div>
         </aside>

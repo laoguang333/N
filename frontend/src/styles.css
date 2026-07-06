@@ -733,6 +733,16 @@ h1 {
   overflow: auto;
 }
 
+.epub-toc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.epub-toc-group .epub-toc-group {
+  padding-left: 14px;
+}
+
 .epub-toc-list button {
   min-height: 38px;
   padding: 8px 10px;
