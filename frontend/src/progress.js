@@ -1,5 +1,16 @@
 export const PROGRESS_CACHE_KEY = "txt-reader-progress";
 
+export function chooseProgress(server, local) {
+  if (!server) return local;
+  if (!local) return server;
+  const serverTime = Date.parse(server.updated_at?.replace(" ", "T") + (/Z$|[+-]\d\d:\d\d$/.test(server.updated_at || "") ? "" : "Z"));
+  const localTime = Date.parse(local.updated_at);
+  if (local.dirty && localTime > serverTime) {
+    return { ...local, version: server.version };
+  }
+  return server;
+}
+
 const ZERO_RESET_PERCENT = 0.001;
 const START_RESET_PERCENT = 0.02;
 
@@ -13,6 +24,7 @@ export function normalizeProgress(bookId, progress, fallback = {}) {
     char_offset: Math.max(0, Number(progress.char_offset) || 0),
     percent: clampPercent(progress.percent),
     locator: typeof progress.locator === "string" && progress.locator ? progress.locator : null,
+    version: Number.isInteger(progress.version) ? progress.version : fallback.version ?? null,
     updated_at: progress.updated_at || fallback.updated_at || new Date().toISOString(),
     dirty: Boolean(progress.dirty ?? fallback.dirty),
   };
@@ -36,6 +48,9 @@ export function savePayload(progress, meta = {}) {
   };
   if (progress.locator) {
     payload.locator = progress.locator;
+  }
+  if (Number.isInteger(progress.version)) {
+    payload.base_version = progress.version;
   }
   return payload;
 }

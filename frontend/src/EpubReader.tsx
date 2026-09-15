@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import ePub from "epubjs";
-import { ArrowLeft, ArrowRight, List, LoaderCircle } from "lucide-react";
+import { List, LoaderCircle } from "lucide-react";
 
+import AutoScroll from "./AutoScroll";
 import {
   epubProgressFromLocation,
   resolveEpubTocHref,
   type EpubTocItem,
 } from "./epub";
+import { createReadingTapHandler } from "./readerPosition";
 
 type EpubReaderProps = {
   url: string;
@@ -17,7 +19,12 @@ type EpubReaderProps = {
     theme: string;
   };
   controlsVisible: boolean;
+  autoScrollPlaying: boolean;
+  autoScrollSpeed: number;
+  interactionBlocked?: boolean;
   onControlsVisibleChange: (visible: boolean) => void;
+  onAutoScrollPlayingChange: (playing: boolean) => void;
+  onAutoScrollSpeedChange: (speed: number) => void;
   onProgress: (progress: { percent: number; locator: string | null }) => void;
 };
 
@@ -46,7 +53,12 @@ export default function EpubReader({
   progress,
   settings,
   controlsVisible,
+  autoScrollPlaying,
+  autoScrollSpeed,
+  interactionBlocked = false,
   onControlsVisibleChange,
+  onAutoScrollPlayingChange,
+  onAutoScrollSpeedChange,
   onProgress,
 }: EpubReaderProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -56,10 +68,15 @@ export default function EpubReader({
   const onProgressRef = useRef(onProgress);
   const controlsVisibleRef = useRef(controlsVisible);
   const onControlsVisibleChangeRef = useRef(onControlsVisibleChange);
+  const autoScrollPlayingRef = useRef(autoScrollPlaying);
+  const onAutoScrollPlayingChangeRef = useRef(onAutoScrollPlayingChange);
+  const interactionBlockedRef = useRef(interactionBlocked);
+  const stageTapHandlerRef = useRef<ReturnType<typeof createReadingTapHandler> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [tocOpen, setTocOpen] = useState(false);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     onProgressRef.current = onProgress;
@@ -68,7 +85,20 @@ export default function EpubReader({
   useEffect(() => {
     controlsVisibleRef.current = controlsVisible;
     onControlsVisibleChangeRef.current = onControlsVisibleChange;
-  }, [controlsVisible, onControlsVisibleChange]);
+    interactionBlockedRef.current = interactionBlocked || tocOpen;
+  }, [controlsVisible, interactionBlocked, tocOpen, onControlsVisibleChange]);
+
+  useEffect(() => {
+    autoScrollPlayingRef.current = autoScrollPlaying;
+    onAutoScrollPlayingChangeRef.current = onAutoScrollPlayingChange;
+  }, [autoScrollPlaying, onAutoScrollPlayingChange]);
+
+  if (!stageTapHandlerRef.current) {
+    stageTapHandlerRef.current = createReadingTapHandler(() => {
+      if (interactionBlockedRef.current) return;
+      onControlsVisibleChangeRef.current(!controlsVisibleRef.current);
+    });
+  }
 
   useEffect(() => {
     const root = rootRef.current;
@@ -80,27 +110,45 @@ export default function EpubReader({
     setError("");
     setToc([]);
     setTocOpen(false);
+    setScrollElement(null);
 
     const book = ePub(url, { openAs: "epub" });
     const rendition = book.renderTo(root, {
       width: "100%",
       height: "100%",
-      flow: "paginated",
+      flow: "scrolled",
       spread: "none",
-      manager: "default",
-    });
+      manager: "continuous",
+    }) as ReturnType<typeof book.renderTo> & { manager?: { container: HTMLElement } };
     bookRef.current = book;
     renditionRef.current = rendition;
+    setScrollElement(rendition.manager?.container || null);
     rendition.hooks.content.register((contents: any) => {
-      contents.document.addEventListener("click", () => {
+      const tapHandler = createReadingTapHandler(() => {
+        if (interactionBlockedRef.current) return;
         onControlsVisibleChangeRef.current(!controlsVisibleRef.current);
       });
+      contents.document.addEventListener("pointerdown", tapHandler.pointerdown);
+      contents.document.addEventListener("pointermove", tapHandler.pointermove);
+      contents.document.addEventListener("pointercancel", tapHandler.pointercancel);
+      contents.document.addEventListener("click", tapHandler.click);
+      const stopAutoScroll = () => {
+        if (autoScrollPlayingRef.current) {
+          onAutoScrollPlayingChangeRef.current(false);
+        }
+      };
+      contents.document.addEventListener("wheel", stopAutoScroll, { passive: true });
+      contents.document.addEventListener("touchmove", stopAutoScroll, { passive: true });
     });
 
     rendition.themes.register("paper", {
       body: {
         color: "#29251f",
         background: "#f8f1e5",
+        margin: "0 auto !important",
+        padding: "20px 20px 64px !important",
+        "box-sizing": "border-box !important",
+        "max-width": "760px !important",
         "line-height": `${settings.lineHeight} !important`,
       },
       "p, div, li": {
@@ -114,6 +162,10 @@ export default function EpubReader({
       body: {
         color: "#e8e1d5",
         background: "#141312",
+        margin: "0 auto !important",
+        padding: "20px 20px 64px !important",
+        "box-sizing": "border-box !important",
+        "max-width": "760px !important",
         "line-height": `${settings.lineHeight} !important`,
       },
       "p, div, li": {
@@ -147,7 +199,11 @@ export default function EpubReader({
 
     rendition
       .display(progress?.locator || undefined)
-      .then(() => setLoading(false))
+      .then(() => {
+        if (disposed) return;
+        setScrollElement(rendition.manager?.container || null);
+        setLoading(false);
+      })
       .catch((err: Error) => {
         setError(err.message || "EPUB 加载失败");
         setLoading(false);
@@ -171,17 +227,10 @@ export default function EpubReader({
     rendition.themes.override("line-height", `${settings.lineHeight}`, true);
   }, [settings.fontSize, settings.lineHeight, settings.theme]);
 
-  function previousPage() {
-    void renditionRef.current?.prev();
-  }
-
-  function nextPage() {
-    void renditionRef.current?.next();
-  }
-
   function displayHref(href: string) {
     const rendition = renditionRef.current;
     if (!rendition) return;
+    onAutoScrollPlayingChange(false);
     const target = resolveEpubTocHref(bookRef.current, href);
     void rendition
       .display(target)
@@ -199,7 +248,12 @@ export default function EpubReader({
       <div
         ref={rootRef}
         className="epub-stage"
-        onClick={() => onControlsVisibleChange(!controlsVisible)}
+        onPointerDown={(event) => stageTapHandlerRef.current?.pointerdown(event.nativeEvent)}
+        onPointerMove={(event) => stageTapHandlerRef.current?.pointermove(event.nativeEvent)}
+        onPointerCancel={() => stageTapHandlerRef.current?.pointercancel()}
+        onClick={(event) => stageTapHandlerRef.current?.click(event.nativeEvent)}
+        onWheel={() => autoScrollPlaying && onAutoScrollPlayingChange(false)}
+        onTouchMove={() => autoScrollPlaying && onAutoScrollPlayingChange(false)}
       />
       {loading && (
         <div className="epub-overlay">
@@ -208,16 +262,30 @@ export default function EpubReader({
       )}
       {error && <p className="error reader-error">{error}</p>}
       <div className={`epub-controls ${controlsVisible || tocOpen ? "is-visible" : ""}`}>
-        <button type="button" className="icon-button" onClick={previousPage} title="上一页">
-          <ArrowLeft size={21} />
-        </button>
-        <button type="button" className="icon-button" onClick={() => setTocOpen((value) => !value)} title="目录">
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => {
+            onAutoScrollPlayingChange(false);
+            setTocOpen((value) => !value);
+          }}
+          title="目录"
+          aria-label="打开 EPUB 目录"
+          aria-expanded={tocOpen}
+        >
           <List size={21} />
         </button>
-        <button type="button" className="icon-button" onClick={nextPage} title="下一页">
-          <ArrowRight size={21} />
-        </button>
       </div>
+      {!loading && scrollElement && (
+        <AutoScroll
+          playing={autoScrollPlaying}
+          speed={autoScrollSpeed}
+          controlsVisible={controlsVisible}
+          scrollElement={scrollElement}
+          onPlayingChange={onAutoScrollPlayingChange}
+          onSpeedChange={onAutoScrollSpeedChange}
+        />
+      )}
       {tocOpen && (
         <aside className="epub-toc">
           <strong>目录</strong>

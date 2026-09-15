@@ -2,22 +2,30 @@ function normalizeText(text) {
   return String(text).toLowerCase();
 }
 
+const SNIPPET_CONTEXT_LENGTH = 35;
+
 export function buildSearchIndex(paragraphs) {
-  let totalLength = 0;
   const entries = [];
 
   for (const paragraph of paragraphs || []) {
     const rawText = String(paragraph.text || "");
     const normalizedText = normalizeText(rawText);
-    const length = Math.max(1, rawText.length);
+    const length = rawText.length;
     entries.push({
       offset: Number(paragraph.offset) || 0,
       text: rawText,
       normalizedText,
       length,
     });
-    totalLength += length;
   }
+
+  // Paragraph offsets refer to positions in the original book text. Summing
+  // paragraph lengths loses the newlines and blank lines between paragraphs,
+  // which makes the search percentage drift from the reader's position.
+  const totalLength = entries.reduce(
+    (end, entry) => Math.max(end, entry.offset + entry.length),
+    0,
+  );
 
   return { entries, totalLength: Math.max(1, totalLength) };
 }
@@ -41,12 +49,22 @@ export function searchWithIndex(index, query) {
 
       const matchText = entry.text.slice(matchIndex, matchIndex + normalizedQuery.length);
       const absoluteOffset = entry.offset + matchIndex;
+      const snippetStart = Math.max(0, matchIndex - SNIPPET_CONTEXT_LENGTH);
+      const snippetEnd = Math.min(
+        entry.text.length,
+        matchIndex + normalizedQuery.length + SNIPPET_CONTEXT_LENGTH,
+      );
+      const snippetBefore = entry.text.slice(snippetStart, matchIndex);
+      const snippetAfter = entry.text.slice(matchIndex + normalizedQuery.length, snippetEnd);
       results.push({
         id: `${entry.offset}-${matchIndex}-${results.length}`,
         paragraphOffset: entry.offset,
         offset: absoluteOffset,
         percent: clampPercent(absoluteOffset / totalLength),
-        text: matchText || entry.text,
+        text: `${snippetBefore}${matchText}${snippetAfter}`,
+        snippetBefore,
+        snippetMatch: matchText,
+        snippetAfter,
         query: normalizedQuery,
         matchStart: matchIndex,
         matchEnd: matchIndex + normalizedQuery.length,

@@ -3,6 +3,7 @@ export const DEFAULT_SETTINGS = {
   lineHeight: 1.85,
   paragraphSpacing: 16,
   theme: "paper",
+  autoScrollSpeed: 5,
 };
 
 export function parseSettings(raw) {
@@ -31,6 +32,7 @@ export function normalizeSettings(value) {
       DEFAULT_SETTINGS.paragraphSpacing,
     ),
     theme: settings.theme === "night" ? "night" : "paper",
+    autoScrollSpeed: Math.round(clampNumber(settings.autoScrollSpeed, 1, 10, DEFAULT_SETTINGS.autoScrollSpeed)),
   };
 }
 
@@ -43,7 +45,7 @@ export function buildParagraphs(content) {
   for (const line of lines) {
     const text = line.trim();
     if (text) {
-      paragraphs.push({ offset, text });
+      paragraphs.push({ offset: offset + line.length - line.trimStart().length, text });
     }
     offset += line.length + 1;
   }
@@ -53,6 +55,48 @@ export function buildParagraphs(content) {
   }
 
   return paragraphs;
+}
+
+const CHAPTER_PATTERNS = [
+  /^(?:第\s*[零〇一二两三四五六七八九十百千万\d]{1,12}\s*[章节卷部篇回话]|卷\s*[零〇一二两三四五六七八九十百千万\d]{1,12})(?:\s*[：:、.．—-]?\s*.*)?$/,
+  /^(?:序章|序言|前言|楔子|引子|后记|终章|尾声|大结局|番外(?:\s*[零〇一二两三四五六七八九十百千万\d]+)?)(?:\s*[：:、.．—-]?\s*.*)?$/,
+  /^(?:chapter|part|volume)\s+[\divxlcdm]+(?:\s*[：:、.．—-]?\s*.*)?$/i,
+];
+
+const MAX_CHAPTER_TITLE_LENGTH = 30;
+
+function limitChapterTitle(title) {
+  return Array.from(title).slice(0, MAX_CHAPTER_TITLE_LENGTH).join("");
+}
+
+export function buildChapters(paragraphs) {
+  return paragraphs.flatMap((paragraph, paragraphIndex) => {
+    const title = String(paragraph.text || "").trim();
+    if (!title || !CHAPTER_PATTERNS.some((pattern) => pattern.test(title))) {
+      return [];
+    }
+    return [{
+      id: `chapter-${paragraph.offset}-${paragraphIndex}`,
+      title: limitChapterTitle(title),
+      offset: paragraph.offset,
+      paragraphIndex,
+    }];
+  });
+}
+
+export function findChapterIndex(chapters, targetOffset) {
+  if (!chapters || chapters.length === 0) return -1;
+  let low = 0;
+  let high = chapters.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (chapters[middle].offset <= targetOffset) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return chapters[low].offset <= targetOffset ? low : -1;
 }
 
 export function buildParagraphOffsetMap(paragraphs) {

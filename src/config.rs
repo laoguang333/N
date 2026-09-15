@@ -34,10 +34,7 @@ impl Default for Config {
             anime_dirs: vec![r"D:\will\[A]".to_string()],
             anime_scan_recursive: true,
             anime_scan_on_startup: false,
-            anime_transcode_cache_dir: app_data
-                .join("anime-hls")
-                .to_string_lossy()
-                .to_string(),
+            anime_transcode_cache_dir: app_data.join("anime-hls").to_string_lossy().to_string(),
             cors_allowed_origins: None,
             tls_cert_path: Some(
                 app_data

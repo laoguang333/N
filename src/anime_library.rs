@@ -10,7 +10,9 @@ use tokio::process::Command;
 
 use crate::models::AnimeScanResult;
 
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "rmvb"];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "rmvb",
+];
 
 #[derive(Default)]
 struct ProbeMeta {
@@ -62,7 +64,9 @@ pub async fn scan_anime_library(
     for dir in dirs {
         let root = PathBuf::from(dir);
         if !root.exists() {
-            result.errors.push(format!("目录不存在: {}", root.display()));
+            result
+                .errors
+                .push(format!("目录不存在: {}", root.display()));
             continue;
         }
         let mut files = Vec::new();
@@ -95,7 +99,12 @@ enum ScanAction {
     Restored,
 }
 
-fn collect_video_files(root: &Path, recursive: bool, files: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+fn collect_video_files(
+    root: &Path,
+    recursive: bool,
+    files: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+) {
     let Ok(entries) = std::fs::read_dir(root) else {
         errors.push(format!("无法读取目录: {}", root.display()));
         return;
@@ -149,10 +158,11 @@ async fn upsert_video(
         .and_then(|value| value.to_str())
         .map(str::to_string);
 
-    let existing = sqlx::query("SELECT id, size, mtime, file_state FROM anime_videos WHERE file_path = ?1")
-        .bind(&file_path)
-        .fetch_optional(db)
-        .await?;
+    let existing =
+        sqlx::query("SELECT id, size, mtime, file_state FROM anime_videos WHERE file_path = ?1")
+            .bind(&file_path)
+            .fetch_optional(db)
+            .await?;
 
     if let Some(row) = existing {
         let id: i64 = row.try_get("id")?;
@@ -174,7 +184,11 @@ async fn upsert_video(
             .bind(id)
             .execute(db)
             .await?;
-            return Ok(if old_state == "missing" { ScanAction::Restored } else { ScanAction::Skipped });
+            return Ok(if old_state == "missing" {
+                ScanAction::Restored
+            } else {
+                ScanAction::Skipped
+            });
         }
 
         let meta = probe_video(ffprobe, path).await.unwrap_or_default();
@@ -204,7 +218,11 @@ async fn upsert_video(
         .bind(meta.height)
         .execute(db)
         .await?;
-        return Ok(if old_state == "missing" { ScanAction::Restored } else { ScanAction::Updated });
+        return Ok(if old_state == "missing" {
+            ScanAction::Restored
+        } else {
+            ScanAction::Updated
+        });
     }
 
     let meta = probe_video(ffprobe, path).await.unwrap_or_default();

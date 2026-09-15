@@ -32,6 +32,7 @@ pub struct ReadingProgress {
     pub char_offset: i64,
     pub percent: f64,
     pub locator: Option<String>,
+    pub version: i64,
     pub updated_at: String,
 }
 
@@ -44,6 +45,7 @@ pub struct SaveProgressRequest {
     pub client_id: Option<String>,
     pub session_id: Option<String>,
     pub allow_backward: Option<bool>,
+    pub base_version: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

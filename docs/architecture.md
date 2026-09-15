@@ -60,6 +60,7 @@ TXT 纯逻辑在 `frontend/src/reader.js`：
 EPUB 阅读在 `frontend/src/EpubReader.tsx`：
 
 - 使用 `epubjs` 在前端解析和渲染 `/api/books/{id}/file`。
+- 使用纵向连续滚动模式加载相邻章节，并复用 TXT 阅读器的自动滚屏和速度控制。
 - 目录来自 EPUB navigation。
 - 阅读位置保存为 EPUB CFI，百分比继续用于书架进度。
 

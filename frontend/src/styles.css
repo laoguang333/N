@@ -183,6 +183,97 @@ h1 {
   font-size: 13px;
 }
 
+.shelf-controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.status-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.status-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.status-tabs button.active {
+  color: var(--accent-strong);
+  font-weight: 700;
+  background: var(--surface-strong);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
+}
+
+.shelf-filter-bar {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 0;
+}
+
+.continue-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(80px, 150px) 22px;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 12px;
+  color: var(--text);
+  text-align: start;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  cursor: pointer;
+}
+
+.continue-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.continue-copy strong {
+  overflow: hidden;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.continue-copy > span:last-child,
+.continue-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.continue-label {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.continue-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 75%, transparent);
+}
+
+.continue-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
 .hidden {
   display: none !important;
 }
@@ -597,14 +688,15 @@ h1 {
 .reader-content p {
   margin: 0;
   overflow-wrap: anywhere;
-  text-align: justify;
+  text-align: start;
 }
 
 .reader-content p.is-match-target {
   scroll-margin-top: 96px;
 }
 
-.reader-content mark {
+.reader-content mark,
+.search-result-text mark {
   padding: 0 0.08em;
   border-radius: 4px;
   color: inherit;
@@ -684,8 +776,8 @@ h1 {
 
 .epub-controls {
   position: fixed;
-  right: 14px;
-  bottom: max(14px, env(safe-area-inset-bottom));
+  right: 76px;
+  bottom: calc(44px + env(safe-area-inset-bottom, 0px));
   z-index: 13;
   display: flex;
   align-items: center;
@@ -960,6 +1052,91 @@ h1 {
   transform: translateY(-10px);
 }
 
+.chapter-drawer {
+  width: min(420px, 88vw);
+  height: 100dvh;
+  max-height: none;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+}
+
+.chapter-drawer::backdrop {
+  background: rgb(0 0 0 / 42%);
+}
+
+.chapter-drawer-sheet {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100%;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: -18px 0 42px rgb(0 0 0 / 18%);
+}
+
+.chapter-drawer-header,
+.chapter-drawer-header > span {
+  display: flex;
+  align-items: center;
+}
+
+.chapter-drawer-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chapter-drawer-header > span {
+  gap: 8px;
+}
+
+.chapter-count {
+  margin: 4px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chapter-list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.chapter-list button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text);
+  text-align: start;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chapter-list button:hover,
+.chapter-list button.active {
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.chapter-list button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chapter-list button small {
+  color: var(--muted);
+}
+
 .auto-scroll-fab {
   position: fixed;
   right: 16px;
@@ -967,7 +1144,7 @@ h1 {
   z-index: 25;
   opacity: 0;
   transform: scale(0.85);
-  pointer-events: auto;
+  pointer-events: none;
   transition:
     opacity 0.22s ease,
     transform 0.22s ease;
@@ -976,6 +1153,7 @@ h1 {
 .auto-scroll-fab.visible {
   opacity: 1;
   transform: scale(1);
+  pointer-events: auto;
 }
 
 .fab-button {
@@ -996,6 +1174,14 @@ h1 {
     background 0.18s,
     border-color 0.18s,
     box-shadow 0.18s;
+}
+
+.fab-button:focus-visible,
+.continue-card:focus-visible,
+.status-tabs button:focus-visible,
+.tab-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .fab-speed {
@@ -1088,8 +1274,27 @@ h1 {
 }
 
 @media (max-width: 560px) {
+  .reader-toolbar .icon-button {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
+  }
+
   .filter-bar {
     grid-template-columns: 1fr;
+  }
+
+  .shelf-filter-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .continue-card {
+    grid-template-columns: minmax(0, 1fr) 22px;
+  }
+
+  .continue-progress {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 
   .anime-path-form {
@@ -1352,12 +1557,16 @@ h1 {
 }
 
 .tab-button {
-  display: inline-grid;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
   place-items: center;
   padding: 0;
   border: 0;
   color: var(--muted);
-  font-size: 28px;
+  font-size: 12px;
   font-weight: 700;
   background: transparent;
   cursor: pointer;
@@ -1367,6 +1576,21 @@ h1 {
 
 .tab-button.active {
   color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  .chapter-drawer {
+    width: 100vw;
+  }
 }
 
 .tauri-test-page {

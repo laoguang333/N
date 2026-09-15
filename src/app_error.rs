@@ -9,6 +9,7 @@ use serde::Serialize;
 pub enum AppError {
     BadRequest(String),
     NotFound(String),
+    Conflict(String),
     Internal(anyhow::Error),
 }
 
@@ -22,6 +23,7 @@ impl IntoResponse for AppError {
         let (status, message) = match self {
             AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            AppError::Conflict(message) => (StatusCode::CONFLICT, message),
             AppError::Internal(error) => {
                 tracing::error!("{error:#}");
                 (

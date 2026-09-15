@@ -1243,8 +1243,16 @@ async fn save_progress(
     let current = fetch_progress(&state.db, id).await?;
     let allow_backward = payload.allow_backward.unwrap_or(false);
 
-    if current.is_some() {
-        sqlx::query(
+    if let Some(current) = current {
+        if let Some(base_version) = payload.base_version
+            && base_version != current.version
+        {
+            return Err(AppError::Conflict(format!(
+                "reading progress changed (expected version {base_version}, current version {})",
+                current.version
+            )));
+        }
+        let result = sqlx::query(
             r#"
             UPDATE reading_progress
             SET
@@ -1253,15 +1261,21 @@ async fn save_progress(
                 locator = ?4,
                 version = version + 1,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE book_id = ?1
+            WHERE book_id = ?1 AND (?5 IS NULL OR version = ?5)
             "#,
         )
         .bind(id)
         .bind(char_offset)
         .bind(percent)
         .bind(payload.locator.as_deref())
+        .bind(payload.base_version)
         .execute(&state.db)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::Conflict(
+                "reading progress changed while saving".to_string(),
+            ));
+        }
     } else {
         sqlx::query(
             r#"
@@ -1338,6 +1352,7 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
             char_offset,
             percent: row.try_get("progress_percent")?,
             locator: row.try_get("progress_locator")?,
+            version: row.try_get("progress_version")?,
             updated_at: row.try_get("progress_updated_at")?,
         }),
         None => None,
@@ -1366,6 +1381,7 @@ fn progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadingProgress, sq
         char_offset: row.try_get("char_offset")?,
         percent: row.try_get("percent")?,
         locator: row.try_get("locator")?,
+        version: row.try_get("version")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
@@ -1539,7 +1555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_progress_overwrites_without_version_checks() {
+    async fn save_progress_supports_legacy_writes_and_rejects_stale_versions() {
         let fixture = TestFixture::new("progress-version").await;
         let id = fixture.insert_book("Book", -1.0, None).await;
 
@@ -1555,11 +1571,30 @@ mod tests {
                 client_id: None,
                 session_id: None,
                 allow_backward: None,
+                base_version: None,
             }),
         )
         .await
         .unwrap();
         assert_eq!(first.percent, 0.5);
+
+        let stale = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 120,
+                percent: 0.6,
+                locator: None,
+                source: Some("stale-test".to_string()),
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+                base_version: Some(first.version - 1),
+            }),
+        )
+        .await;
+        assert!(matches!(stale, Err(AppError::Conflict(_))));
 
         let Json(second) = save_progress(
             State(fixture.state.clone()),
@@ -1573,6 +1608,7 @@ mod tests {
                 client_id: None,
                 session_id: None,
                 allow_backward: None,
+                base_version: None,
             }),
         )
         .await
@@ -1591,6 +1627,7 @@ mod tests {
                 client_id: None,
                 session_id: None,
                 allow_backward: None,
+                base_version: None,
             }),
         )
         .await
@@ -1609,6 +1646,7 @@ mod tests {
                 client_id: None,
                 session_id: None,
                 allow_backward: Some(true),
+                base_version: None,
             }),
         )
         .await
