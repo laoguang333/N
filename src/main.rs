@@ -47,6 +47,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub struct AppState {
     pub config: Config,
     pub db: sqlx::SqlitePool,
+    pub scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,8 +95,10 @@ struct RunningServer {
 async fn start_server(config: Config) -> anyhow::Result<RunningServer> {
     let db = connect_db(&config.database_path).await?;
     migrate(&db).await?;
+    let scan_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     if config.scan_on_startup {
+        let _scan_guard = scan_lock.lock().await;
         let result = scan_library(&db, &config.library_dirs, config.scan_recursive).await?;
         tracing::info!(
             scanned = result.scanned,
@@ -125,6 +128,7 @@ async fn start_server(config: Config) -> anyhow::Result<RunningServer> {
     let state = Arc::new(AppState {
         config: config.clone(),
         db,
+        scan_lock,
     });
 
     let cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);

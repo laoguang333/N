@@ -60,6 +60,7 @@ pub struct ScanResult {
     pub added: usize,
     pub updated: usize,
     pub skipped: usize,
+    pub cleanup_skipped: bool,
     pub errors: Vec<String>,
 }
 

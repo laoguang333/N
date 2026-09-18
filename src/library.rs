@@ -1,12 +1,13 @@
 use std::{
     collections::HashSet,
+    io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
     time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, anyhow};
 use chardetng::EncodingDetector;
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use tokio::{fs, io::AsyncReadExt};
 
@@ -17,7 +18,7 @@ use crate::models::ScanResult;
 #[derive(Debug)]
 struct ExistingBook {
     id: i64,
-    file_hash: String,
+    file_path: String,
     size: i64,
     mtime: i64,
 }
@@ -34,10 +35,64 @@ struct ScannedBookFile {
     folder_tag: Option<String>,
 }
 
+#[cfg(not(test))]
 pub async fn scan_library(
     db: &SqlitePool,
     library_dirs: &[String],
     recursive: bool,
+) -> anyhow::Result<ScanResult> {
+    scan_library_inner(db, library_dirs, recursive).await
+}
+
+#[cfg(test)]
+pub async fn scan_library(
+    db: &SqlitePool,
+    library_dirs: &[String],
+    recursive: bool,
+) -> anyhow::Result<ScanResult> {
+    scan_library_inner(db, library_dirs, recursive, None).await
+}
+
+#[cfg(test)]
+async fn scan_library_with_read_fault(
+    db: &SqlitePool,
+    library_dirs: &[String],
+    recursive: bool,
+    fault_path: &Path,
+) -> anyhow::Result<ScanResult> {
+    scan_library_inner(db, library_dirs, recursive, Some(fault_path)).await
+}
+
+#[cfg(not(test))]
+async fn scan_library_inner(
+    db: &SqlitePool,
+    library_dirs: &[String],
+    recursive: bool,
+) -> anyhow::Result<ScanResult> {
+    scan_library_inner_impl(db, library_dirs, recursive, ()).await
+}
+
+#[cfg(test)]
+type ScanOptions<'a> = Option<&'a Path>;
+
+#[cfg(not(test))]
+type ScanOptions<'a> = ();
+
+#[cfg(test)]
+async fn scan_library_inner(
+    db: &SqlitePool,
+    library_dirs: &[String],
+    recursive: bool,
+    read_fault_path: Option<&Path>,
+) -> anyhow::Result<ScanResult> {
+    scan_library_inner_impl(db, library_dirs, recursive, read_fault_path).await
+}
+
+async fn scan_library_inner_impl(
+    db: &SqlitePool,
+    library_dirs: &[String],
+    recursive: bool,
+    _scan_options: ScanOptions<'_>,
 ) -> anyhow::Result<ScanResult> {
     let mut seen_paths = HashSet::new();
     let mut result = ScanResult {
@@ -47,25 +102,20 @@ pub async fn scan_library(
         updated: 0,
         skipped: 0,
         errors: Vec::new(),
+        cleanup_skipped: false,
     };
 
-    let library_roots = Arc::new(canonical_library_roots(library_dirs)?);
+    let (library_roots, created_any_root) =
+        initialize_library_roots(library_dirs, &mut result.errors).await;
+    let canonical_roots = library_roots
+        .iter()
+        .map(|root| root.canonical.clone())
+        .collect::<Vec<_>>();
 
-    for dir in library_dirs {
-        let dir_path = PathBuf::from(dir);
-        if !dir_path.exists()
-            && let Err(error) = fs::create_dir_all(&dir_path).await
-        {
-            result.errors.push(format!(
-                "failed to create library directory {}: {error}",
-                dir_path.display()
-            ));
-            continue;
-        }
+    for root in &library_roots {
+        tracing::info!(dir = %root.configured.display(), "collecting book files");
 
-        tracing::info!(dir = %dir_path.display(), "collecting book files");
-
-        let files = match collect_book_files(&dir_path, recursive).await {
+        let files = match collect_book_files(&root.configured, recursive).await {
             Ok(files) => files,
             Err(error) => {
                 result.errors.push(error.to_string());
@@ -73,12 +123,37 @@ pub async fn scan_library(
             }
         };
 
-        tracing::info!(count = files.len(), dir = %dir_path.display(), "found book files");
+        tracing::info!(
+            count = files.len(),
+            dir = %root.configured.display(),
+            "found book files"
+        );
 
         for path in files {
             result.scanned += 1;
 
-            let scanned = match prepare_scan_file(db, &path, &library_roots).await {
+            let canonical_path = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    result
+                        .errors
+                        .push(format!("failed to scan {}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            let file_path = canonical_path.to_string_lossy().to_string();
+            seen_paths.insert(file_path);
+
+            #[cfg(test)]
+            if _scan_options.is_some_and(|fault_path| fault_path == path) {
+                result.errors.push(format!(
+                    "failed to scan {}: injected read error",
+                    path.display()
+                ));
+                continue;
+            }
+
+            let scanned = match prepare_scan_file(&path, &canonical_path, &canonical_roots).await {
                 Ok(scanned) => scanned,
                 Err(error) => {
                     result
@@ -88,7 +163,6 @@ pub async fn scan_library(
                 }
             };
 
-            seen_paths.insert(scanned.file_path.clone());
             match apply_scan_result(db, &scanned).await {
                 Ok(BookScanOutcome::Skipped) => result.skipped += 1,
                 Ok(BookScanOutcome::Added) => result.added += 1,
@@ -120,7 +194,13 @@ pub async fn scan_library(
         "scan chores complete, removing missing books"
     );
 
-    result.removed = remove_missing_books(db, library_dirs, recursive, &seen_paths).await?;
+    let cleanup_allowed = result.errors.is_empty() && !created_any_root;
+    result.cleanup_skipped = !cleanup_allowed;
+    if cleanup_allowed {
+        result.removed =
+            remove_missing_books(db, library_dirs, recursive, &seen_paths, &mut result.errors)
+                .await?;
+    }
 
     tracing::info!(
         scanned = result.scanned,
@@ -135,13 +215,70 @@ pub async fn scan_library(
     Ok(result)
 }
 
+struct LibraryRoot {
+    configured: PathBuf,
+    canonical: PathBuf,
+}
+
+async fn initialize_library_roots(
+    library_dirs: &[String],
+    errors: &mut Vec<String>,
+) -> (Vec<LibraryRoot>, bool) {
+    let mut roots = Vec::new();
+    let mut created_any_root = false;
+
+    for dir in library_dirs {
+        let configured = PathBuf::from(dir);
+        match fs::metadata(&configured).await {
+            Ok(metadata) if !metadata.is_dir() => {
+                errors.push(format!(
+                    "library root is not a directory: {}",
+                    configured.display()
+                ));
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if let Err(error) = fs::create_dir_all(&configured).await {
+                    errors.push(format!(
+                        "failed to create library directory {}: {error}",
+                        configured.display()
+                    ));
+                    continue;
+                }
+                created_any_root = true;
+            }
+            Err(error) => {
+                errors.push(format!(
+                    "failed to inspect library directory {}: {error}",
+                    configured.display()
+                ));
+                continue;
+            }
+        }
+
+        match configured.canonicalize() {
+            Ok(canonical) => roots.push(LibraryRoot {
+                configured,
+                canonical,
+            }),
+            Err(error) => errors.push(format!(
+                "failed to canonicalize library directory {dir}: {error}"
+            )),
+        }
+    }
+
+    (roots, created_any_root)
+}
+
 async fn prepare_scan_file(
-    db: &SqlitePool,
     path: &Path,
+    canonical_path: &Path,
     library_roots: &[PathBuf],
 ) -> anyhow::Result<ScannedBookFile> {
     let metadata = fs::metadata(path).await?;
-    let canonical_path = path.canonicalize()?;
+    let bytes = read_all(path).await?;
+    let file_hash = format!("{:x}", Sha256::digest(&bytes));
     let file_path = canonical_path.to_string_lossy().to_string();
     let size = metadata.len() as i64;
     let mtime = metadata
@@ -153,11 +290,6 @@ async fn prepare_scan_file(
     let folder_tag = compute_folder_tag(&file_path, library_roots);
     let format = book_format(path)?;
     let encoding = if format == "txt" { "TEXT" } else { "EPUB" }.to_string();
-
-    let file_hash = existing_book_by_path(db, &file_path)
-        .await?
-        .map(|existing| existing.file_hash)
-        .unwrap_or_default();
 
     Ok(ScannedBookFile {
         title: title_from_path(path),
@@ -179,6 +311,11 @@ async fn apply_scan_result(
         if existing.size == scanned.size && existing.mtime == scanned.mtime {
             return Ok(BookScanOutcome::Skipped);
         }
+        update_book(db, existing.id, scanned).await?;
+        return Ok(BookScanOutcome::Updated);
+    }
+
+    if let Some(existing) = existing_book_by_hash(db, &scanned.file_hash).await? {
         update_book(db, existing.id, scanned).await?;
         return Ok(BookScanOutcome::Updated);
     }
@@ -244,19 +381,38 @@ async fn existing_book_by_path(
     db: &SqlitePool,
     file_path: &str,
 ) -> anyhow::Result<Option<ExistingBook>> {
-    let row =
-        sqlx::query("SELECT id, file_path, file_hash, size, mtime FROM books WHERE file_path = ?1")
-            .bind(file_path)
-            .fetch_optional(db)
-            .await?;
+    let row = sqlx::query("SELECT id, file_path, size, mtime FROM books WHERE file_path = ?1")
+        .bind(file_path)
+        .fetch_optional(db)
+        .await?;
 
     Ok(row.map(existing_book_from_row).transpose()?)
+}
+
+async fn existing_book_by_hash(
+    db: &SqlitePool,
+    file_hash: &str,
+) -> anyhow::Result<Option<ExistingBook>> {
+    let rows = sqlx::query("SELECT id, file_path, size, mtime FROM books WHERE file_hash = ?1")
+        .bind(file_hash)
+        .fetch_all(db)
+        .await?;
+
+    for row in rows {
+        let existing = existing_book_from_row(row)?;
+        match fs::metadata(&existing.file_path).await {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Some(existing)),
+            Err(_) | Ok(_) => {}
+        }
+    }
+
+    Ok(None)
 }
 
 fn existing_book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ExistingBook, sqlx::Error> {
     Ok(ExistingBook {
         id: row.try_get("id")?,
-        file_hash: row.try_get("file_hash")?,
+        file_path: row.try_get("file_path")?,
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
     })
@@ -329,6 +485,7 @@ async fn remove_missing_books(
     library_dirs: &[String],
     recursive: bool,
     seen_paths: &HashSet<String>,
+    errors: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
     let library_roots = canonical_library_roots(library_dirs)?;
     let rows = sqlx::query("SELECT id, file_path FROM books")
@@ -341,7 +498,23 @@ async fn remove_missing_books(
         let file_path: String = row.try_get("file_path")?;
         let path = PathBuf::from(&file_path);
 
-        if is_library_file(&path, &library_roots, recursive) && !seen_paths.contains(&file_path) {
+        if seen_paths.contains(&file_path) {
+            continue;
+        }
+
+        match fs::metadata(&path).await {
+            Ok(_) => continue,
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                errors.push(format!(
+                    "failed to verify missing book {}: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+            Err(_) => {}
+        }
+
+        if is_library_file(&path, &library_roots, recursive) {
             sqlx::query("DELETE FROM books WHERE id = ?1")
                 .bind(id)
                 .execute(db)
@@ -493,6 +666,7 @@ mod tests {
             .unwrap();
         assert_eq!(third.scanned, 0);
         assert_eq!(third.removed, 1);
+        assert!(!third.cleanup_skipped);
 
         fixture.cleanup().await;
     }
@@ -522,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moved_file_is_treated_as_a_new_book_without_hash_matching() {
+    async fn moved_file_keeps_existing_book_and_progress() {
         let fixture = TestFixture::new("scan-move").await;
         let old_path = fixture.library.join("Old.txt");
         let new_path = fixture.library.join("New.txt");
@@ -542,27 +716,39 @@ mod tests {
         .execute(&fixture.db)
         .await
         .unwrap();
+        sqlx::query("UPDATE books SET rating = 5 WHERE id = ?1")
+            .bind(id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
 
         fs::rename(&old_path, &new_path).await.unwrap();
         let result = scan_library(&fixture.db, &[fixture.library_dir()], false)
             .await
             .unwrap();
-        assert_eq!(result.added, 1);
-        assert_eq!(result.removed, 1);
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
 
         let new_id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'New'")
             .fetch_one(&fixture.db)
             .await
             .unwrap();
-        assert_ne!(id, new_id);
+        assert_eq!(id, new_id);
 
-        let old_progress: Option<i64> =
+        let progress: Option<i64> =
             sqlx::query_scalar("SELECT char_offset FROM reading_progress WHERE book_id = ?1")
                 .bind(id)
                 .fetch_optional(&fixture.db)
                 .await
                 .unwrap();
-        assert!(old_progress.is_none());
+        assert_eq!(progress, Some(4));
+
+        let rating: Option<i64> = sqlx::query_scalar("SELECT rating FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        assert_eq!(rating, Some(5));
 
         fixture.cleanup().await;
     }
@@ -630,6 +816,142 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(tag.as_deref(), Some("Author"));
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn scan_creates_missing_root_before_canonicalize() {
+        let fixture = TestFixture::new("scan-create-root").await;
+        let missing_root = fixture.root.join("new-library");
+        assert!(!missing_root.exists());
+
+        let result = scan_library(
+            &fixture.db,
+            &[missing_root.to_string_lossy().into_owned()],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(missing_root.is_dir());
+        assert!(result.errors.is_empty());
+        assert_eq!(result.removed, 0);
+        assert!(result.cleanup_skipped);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn scan_error_skips_missing_cleanup() {
+        let fixture = TestFixture::new("scan-error-retains-records").await;
+        let book = fixture.library.join("Keep.txt");
+        fs::write(&book, "hello").await.unwrap();
+        scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'Keep'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE books SET rating = 5 WHERE id = ?1")
+            .bind(id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 2, 0.4)",
+        )
+        .bind(id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+        fs::remove_file(&book).await.unwrap();
+        let bad_root = fixture.root.join("not-a-directory");
+        fs::write(&bad_root, "file").await.unwrap();
+
+        let result = scan_library(
+            &fixture.db,
+            &[
+                fixture.library_dir(),
+                bad_root.to_string_lossy().into_owned(),
+            ],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.errors.is_empty());
+        assert_eq!(result.removed, 0);
+        assert!(result.cleanup_skipped);
+        let rating: i64 = sqlx::query_scalar("SELECT rating FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        let percent: f64 =
+            sqlx::query_scalar("SELECT percent FROM reading_progress WHERE book_id = ?1")
+                .bind(id)
+                .fetch_one(&fixture.db)
+                .await
+                .unwrap();
+        assert_eq!(rating, 5);
+        assert_eq!(percent, 0.4);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn scan_read_error_preserves_existing_book() {
+        let fixture = TestFixture::new("scan-read-error-retains-records").await;
+        let book = fixture.library.join("Keep.txt");
+        fs::write(&book, "hello").await.unwrap();
+        scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'Keep'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE books SET rating = 4 WHERE id = ?1")
+            .bind(id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 3, 0.6)",
+        )
+        .bind(id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+
+        let result =
+            scan_library_with_read_fault(&fixture.db, &[fixture.library_dir()], false, &book)
+                .await
+                .unwrap();
+
+        assert!(!result.errors.is_empty());
+        assert_eq!(result.removed, 0);
+        let stored_path: String = sqlx::query_scalar("SELECT file_path FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        let rating: i64 = sqlx::query_scalar("SELECT rating FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        let percent: f64 =
+            sqlx::query_scalar("SELECT percent FROM reading_progress WHERE book_id = ?1")
+                .bind(id)
+                .fetch_one(&fixture.db)
+                .await
+                .unwrap();
+        assert_eq!(stored_path, book.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(rating, 4);
+        assert_eq!(percent, 0.6);
 
         fixture.cleanup().await;
     }

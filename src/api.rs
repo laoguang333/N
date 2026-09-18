@@ -97,6 +97,13 @@ async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig>
 }
 
 async fn scan(State(state): State<Arc<AppState>>) -> Result<Json<ScanResult>, AppError> {
+    let _scan_guard = state
+        .scan_lock
+        .try_lock()
+        .map_err(|_| AppError::ConflictCode {
+            message: "a library scan is already in progress".to_string(),
+            code: "scan_in_progress".to_string(),
+        })?;
     let result = scan_library(
         &state.db,
         &state.config.library_dirs,
@@ -1442,6 +1449,7 @@ mod tests {
     };
 
     use axum::extract::{Path, Query, State};
+    use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
 
     use crate::{
         AppState,
@@ -1451,6 +1459,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn scan_lock_rejects_overlapping_scan() {
+        let fixture = TestFixture::new("scan-lock").await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+        let guard = fixture.state.scan_lock.lock().await;
+
+        let error = scan(State(fixture.state.clone())).await.unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "scan_in_progress");
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM books")
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+
+        drop(guard);
+        let Json(result) = scan(State(fixture.state.clone())).await.unwrap();
+        assert!(result.errors.is_empty());
+
+        fixture.cleanup().await;
+    }
 
     #[tokio::test]
     async fn save_rating_accepts_clear_and_rejects_out_of_range() {
@@ -1773,9 +1809,14 @@ mod tests {
             let db_path = root.join("reader.sqlite");
             let db = connect_db(db_path.to_str().unwrap()).await.unwrap();
             migrate(&db).await.unwrap();
+            let config = Config {
+                library_dirs: vec![root.join("novels").to_string_lossy().into_owned()],
+                ..Config::default()
+            };
             let state = Arc::new(AppState {
-                config: Config::default(),
+                config,
                 db,
+                scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             });
 
             Self { root, state }
