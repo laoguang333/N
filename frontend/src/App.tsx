@@ -64,6 +64,7 @@ import FolderOverlay from "./FolderOverlay";
 import EpubReader from "./EpubReader";
 import ChapterDrawer from "./ChapterDrawer";
 import { characterRect, createReadingTapHandler, readingTop, readTextPosition } from "./readerPosition";
+import { createRequestScope } from "./request-scope";
 
 const STORAGE_KEY = "txt-reader-settings";
 const CLIENT_ID_KEY = "txt-reader-client-id";
@@ -100,6 +101,10 @@ function afterNextPaint() {
       window.requestAnimationFrame(() => resolve());
     });
   });
+}
+
+function isAbortError(error: unknown) {
+  return Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
 }
 
 function formatAnimeDuration(seconds: number) {
@@ -230,6 +235,30 @@ export default function App() {
   const matchMap = useRef<Map<number, any[]> | null>(null);
   const readerRef = useRef(reader);
   const routeRef = useRef(route);
+  const shelfScope = useMemo(() => createRequestScope(), []);
+  const readerScope = useMemo(() => createRequestScope(), []);
+  const readerTicketRef = useRef<any>(null);
+
+  const clearReaderAsyncWork = useCallback(() => {
+    [saveTimer, scrollTimer, progressFrame, seekFrame, autoScrollSaveTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
+      if (timer.current) {
+        if (timer === progressFrame || timer === seekFrame) window.cancelAnimationFrame(timer.current);
+        else window.clearTimeout(timer.current);
+        timer.current = null;
+      }
+    });
+    pendingSeekValue.current = null;
+    updateReader({ progressSeeking: false, pendingSeekPercent: null });
+  }, []);
+
+  const invalidateReaderSession = useCallback(() => {
+    readerScope.invalidate();
+    readerTicketRef.current = null;
+    openRequestId.current += 1;
+    navigationId.current += 1;
+    clearReaderAsyncWork();
+    restoreSavingBlocked.current = false;
+  }, [clearReaderAsyncWork, readerScope]);
 
   useEffect(() => { readerRef.current = reader; }, [reader]);
   useEffect(() => { routeRef.current = route; }, [route]);
@@ -392,19 +421,35 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => updateReader({ toast: "" }), 4500);
   }
 
-  function applySavedProgress(saved: any) {
+  function isCurrentReaderSession(ticket: any, bookId: number) {
+    return Boolean(
+      ticket
+      && readerScope.isCurrent(ticket)
+      && routeRef.current.name === "reader"
+      && routeRef.current.bookId === bookId
+      && readerTicketRef.current?.generation === ticket.generation,
+    );
+  }
+
+  function applySavedProgress(saved: any, expectedBookId: number | null = null, expectedTicket: any = null) {
+    const savedBookId = Number(saved?.book_id);
+    if (!Number.isFinite(savedBookId) || (expectedBookId !== null && savedBookId !== expectedBookId)) {
+      return readerRef.current.progress;
+    }
     const currentReader = readerRef.current;
-    const normalized = normalizeProgress(currentReader.book?.book_id, saved, { dirty: false });
+    const normalized = normalizeProgress(savedBookId, { ...saved, book_id: savedBookId }, { dirty: false });
     if (!normalized) return currentReader.progress;
-    const local = currentReader.book?.book_id === normalized.book_id
-      ? currentReader.progress : loadCachedProgress(normalized.book_id);
+    const currentMatches = expectedTicket
+      ? isCurrentReaderSession(expectedTicket, savedBookId)
+      : currentReader.book?.book_id === savedBookId;
+    const local = currentMatches ? currentReader.progress : loadCachedProgress(normalized.book_id);
     if (local?.dirty && (local.char_offset !== normalized.char_offset || local.percent !== normalized.percent)) {
       const latest = cacheProgress(normalized.book_id, { ...local, version: normalized.version }, { dirty: true });
-      if (currentReader.book?.book_id === normalized.book_id) updateReader({ progress: latest });
+      if (currentMatches) updateReader({ progress: latest });
       return latest;
     }
     const cached = cacheProgress(normalized.book_id, normalized, { dirty: false });
-    if (currentReader.book?.book_id === normalized.book_id) updateReader({ progress: cached });
+    if (currentMatches) updateReader({ progress: cached });
     updateShelfBookProgress(cached);
     return cached;
   }
@@ -413,10 +458,12 @@ export default function App() {
     const currentReader = readerRef.current;
     const progress = options.reuseCurrent ? currentReader.progress : snapshotProgress({ source });
     if (!progress || !currentReader.book) return;
+    const savingBookId = currentReader.book.book_id;
+    const savingTicket = readerTicketRef.current;
     const payload = savePayload(progress, progressMeta(source));
-    if (!saveProgressBeacon(currentReader.book.book_id, payload)) {
-      void saveProgressKeepalive(currentReader.book.book_id, payload)
-        .then((saved: any) => applySavedProgress(saved))
+    if (!saveProgressBeacon(savingBookId, payload)) {
+      void saveProgressKeepalive(savingBookId, payload)
+        .then((saved: any) => applySavedProgress(saved, savingBookId, savingTicket))
         .catch(() => {});
     }
   }, [snapshotProgress]);
@@ -426,18 +473,25 @@ export default function App() {
     const source = options.source || "debounced";
     const progress = options.reuseCurrent ? currentReader.progress : snapshotProgress(options);
     if (!progress || !currentReader.book || saveInFlight.current) return progress;
+    const savingBookId = currentReader.book.book_id;
+    const savingTicket = readerTicketRef.current;
     saveInFlight.current = true;
     try {
       const saved = await saveProgress(
-        currentReader.book.book_id,
+        savingBookId,
         savePayload(progress, progressMeta(source, options)),
         options,
       );
-      lastSaveSucceeded.current = true;
-      return applySavedProgress(saved);
+      if (Number(saved?.book_id) !== savingBookId) return progress;
+      if (isCurrentReaderSession(savingTicket, savingBookId)) lastSaveSucceeded.current = true;
+      return applySavedProgress(saved, savingBookId, savingTicket);
     } catch (error) {
-      lastSaveSucceeded.current = false;
-      showToast(`保存失败: ${(error as Error).message}`);
+      if (!isAbortError(error)) {
+        if (isCurrentReaderSession(savingTicket, savingBookId)) {
+          lastSaveSucceeded.current = false;
+          showToast(`保存失败: ${(error as Error).message}`);
+        }
+      }
       return progress;
     } finally {
       saveInFlight.current = false;
@@ -446,7 +500,13 @@ export default function App() {
 
   const scheduleProgressSave = useCallback((delay = 650, options: any = {}) => {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => saveProgressNow({ quiet: true, ...options }), delay);
+    const ticket = readerTicketRef.current;
+    const bookId = readerRef.current.book?.book_id;
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
+      void saveProgressNow({ quiet: true, ...options });
+    }, delay);
   }, [saveProgressNow]);
 
   const updateVisibleProgress = useCallback(() => {
@@ -517,6 +577,7 @@ export default function App() {
   }
 
   const loadBooks = useCallback(async () => {
+    const ticket = shelfScope.begin();
     updateShelf({ loading: true, error: "" });
     try {
       const current = await new Promise<typeof shelf>((resolve) => setShelf((value) => {
@@ -528,7 +589,8 @@ export default function App() {
         status: current.status,
         minRating: current.minRating,
         sort: current.sort,
-      });
+      }, { signal: ticket.signal });
+      if (!shelfScope.isCurrent(ticket)) return;
       const items = normalizeShelfItems(data);
       const continueBook = current.search === ""
         && current.status === "all"
@@ -539,9 +601,10 @@ export default function App() {
       updateShelf({ items, continueBook, loading: false });
       window.requestAnimationFrame(scheduleShelfMeasure);
     } catch (error) {
+      if (!shelfScope.isCurrent(ticket) || isAbortError(error)) return;
       updateShelf({ error: (error as Error).message, loading: false });
     }
-  }, [scheduleShelfMeasure]);
+  }, [scheduleShelfMeasure, shelfScope]);
 
   async function loadConfig() {
     try {
@@ -575,8 +638,10 @@ export default function App() {
     }
   }
 
-  async function navigateToOffset(offset: number, atEnd = false) {
+  async function navigateToOffset(offset: number, atEnd = false, session: { ticket?: any; bookId?: number } = {}) {
     const id = ++navigationId.current;
+    const ticket = session.ticket || readerTicketRef.current;
+    const bookId = session.bookId || routeRef.current.bookId;
     restoreSavingBlocked.current = true;
     try {
       const index = findParagraphIndex(offset, paraOffsetMap.current);
@@ -590,7 +655,7 @@ export default function App() {
       let stableFrames = 0;
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await afterNextPaint();
-        if (id !== navigationId.current || routeRef.current.name !== "reader") return false;
+        if (id !== navigationId.current || !isCurrentReaderSession(ticket, bookId)) return false;
         const root = readerRoot.current;
         if (!root) return false;
         const paragraph = root.querySelector<HTMLElement>(`p[data-offset="${readerRef.current.paragraphs[index]?.offset}"]`);
@@ -607,16 +672,19 @@ export default function App() {
         else stableFrames = 0;
         if (stableFrames >= 2) break;
       }
-      if (id !== navigationId.current) return false;
+      if (id !== navigationId.current || !isCurrentReaderSession(ticket, bookId)) return false;
       updateVisibleProgress();
       return true;
     } finally {
       // A superseded navigation must not unlock the replacement's restoration.
-      if (id === navigationId.current) restoreSavingBlocked.current = false;
+      if (id === navigationId.current && isCurrentReaderSession(ticket, bookId)) restoreSavingBlocked.current = false;
     }
   }
 
   const openBook = useCallback(async (bookId: number) => {
+    clearReaderAsyncWork();
+    const ticket = readerScope.begin();
+    readerTicketRef.current = ticket;
     const requestId = ++openRequestId.current;
     navigationId.current += 1;
     updateReader({
@@ -643,9 +711,12 @@ export default function App() {
     restoreSavingBlocked.current = true;
     if (readerRoot.current) readerRoot.current.scrollTop = 0;
     try {
-      const [summary, progress] = await Promise.all([getBook(bookId), getProgress(bookId)]);
+      const [summary, progress] = await Promise.all([
+        getBook(bookId, { signal: ticket.signal }),
+        getProgress(bookId, { signal: ticket.signal }),
+      ]);
       const serverProgress = normalizeProgress(bookId, progress, { dirty: false });
-      if (requestId !== openRequestId.current || routeRef.current.bookId !== bookId) return;
+      if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       const restoredProgress = chooseProgress(serverProgress, loadCachedProgress(bookId));
       if (restoredProgress) cacheProgress(bookId, restoredProgress);
       if (summary.format === "epub") {
@@ -657,11 +728,11 @@ export default function App() {
           controlsVisible: window.matchMedia("(min-width: 760px)").matches,
           loading: false,
         });
-        restoreSavingBlocked.current = false;
+        if (isCurrentReaderSession(ticket, bookId)) restoreSavingBlocked.current = false;
         return;
       }
-      const content = await getBookContent(bookId);
-      if (requestId !== openRequestId.current || routeRef.current.bookId !== bookId) return;
+      const content = await getBookContent(bookId, { signal: ticket.signal });
+      if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       const paragraphs = buildParagraphs(content.content);
       const chapters = buildChapters(paragraphs);
       searchIndex.current = buildSearchIndex(paragraphs);
@@ -676,21 +747,23 @@ export default function App() {
         loading: false,
       });
       await afterNextPaint();
-      if (requestId !== openRequestId.current) return;
+      if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       const offset = restoredProgress?.char_offset || offsetForPercent(restoredProgress?.percent || 0);
-      const restored = await navigateToOffset(offset, restoredProgress?.percent === 1);
-      if (!restored || requestId !== openRequestId.current) return;
+      const restored = await navigateToOffset(offset, restoredProgress?.percent === 1, { ticket, bookId });
+      if (!restored || requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       if (!serverProgress || restoredProgress?.dirty) scheduleProgressSave(300, { force: true, source: "open_mark" });
     } catch (error) {
-      if (requestId !== openRequestId.current || routeRef.current.bookId !== bookId) return;
+      if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
       updateReader({ error: (error as Error).message, loading: false });
       restoreSavingBlocked.current = false;
     }
-  }, [scheduleProgressSave, updateVisibleProgress]);
+  }, [clearReaderAsyncWork, offsetForPercent, readerScope, scheduleProgressSave, updateVisibleProgress]);
 
   const saveEpubProgress = useCallback(async (nextProgress: { percent: number; locator: string | null }) => {
     const currentReader = readerRef.current;
     if (!currentReader.book) return;
+    const savingBookId = currentReader.book.book_id;
+    const savingTicket = readerTicketRef.current;
     const progress = cacheProgress(currentReader.book.book_id, {
       book_id: currentReader.book.book_id,
       char_offset: 0,
@@ -701,12 +774,12 @@ export default function App() {
     if (!progress) return;
     try {
       const saved = await saveProgress(
-        currentReader.book.book_id,
+        savingBookId,
         savePayload(progress, progressMeta("epub_relocated")),
       );
-      applySavedProgress(saved);
-    } catch {
-      showToast("保存 EPUB 进度失败");
+      if (Number(saved?.book_id) === savingBookId) applySavedProgress(saved, savingBookId, savingTicket);
+    } catch (error) {
+      if (!isAbortError(error) && isCurrentReaderSession(savingTicket, savingBookId)) showToast("保存 EPUB 进度失败");
     }
   }, []);
 
@@ -728,9 +801,7 @@ export default function App() {
       const current = routeRef.current;
       if (current.name === "reader" && (!next.bookId || next.bookId !== current.bookId)) {
         saveProgressInBackground("route_change", { reuseCurrent: true });
-        openRequestId.current += 1;
-        navigationId.current += 1;
-        restoreSavingBlocked.current = false;
+        invalidateReaderSession();
       }
       if (next.name !== "reader") updateReader({ settingsOpen: false });
       routeRef.current = next;
@@ -742,11 +813,10 @@ export default function App() {
 
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [saveProgressInBackground, shelf.scrollTop]);
+  }, [invalidateReaderSession, saveProgressInBackground, shelf.scrollTop]);
 
   useEffect(() => {
     loadConfig();
-    void loadBooks();
     void getAnimeTools()
       .then((tools) => updateAnime({ tools }))
       .catch(() => updateAnime({ tools: { ffmpeg: null, ffprobe: null } }));
@@ -770,8 +840,15 @@ export default function App() {
 
   useEffect(() => {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
-    shelfTimer.current = window.setTimeout(loadBooks, 180);
-  }, [shelf.search, shelf.status, shelf.minRating, shelf.sort]);
+    shelfScope.invalidate();
+    shelfTimer.current = window.setTimeout(() => void loadBooks(), 180);
+    return () => {
+      if (shelfTimer.current) {
+        window.clearTimeout(shelfTimer.current);
+        shelfTimer.current = null;
+      }
+    };
+  }, [loadBooks, shelf.search, shelf.status, shelf.minRating, shelf.sort, shelfScope]);
 
   useEffect(() => {
     if (route.name !== "tab-a") return;
@@ -851,8 +928,12 @@ export default function App() {
 
   useEffect(() => {
     if (searchDebounceTimer.current) window.clearTimeout(searchDebounceTimer.current);
+    const ticket = readerTicketRef.current;
+    const bookId = readerRef.current.book?.book_id;
     searchDebounceTimer.current = window.setTimeout(() => {
+      searchDebounceTimer.current = null;
       const currentReader = readerRef.current;
+      if (bookId && !isCurrentReaderSession(ticket, bookId)) return;
       if (!currentReader.book) {
         matchMap.current = null;
         updateReader({ searchResults: [], activeSearchId: "" });
@@ -878,8 +959,11 @@ export default function App() {
         updateVisibleProgress();
       }
       if (autoScrollSaveTimer.current === null) {
+        const ticket = readerTicketRef.current;
+        const bookId = readerRef.current.book?.book_id;
         autoScrollSaveTimer.current = window.setTimeout(() => {
           autoScrollSaveTimer.current = null;
+          if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
           snapshotProgress({ source: "auto_scroll", persistLocal: false });
           scheduleProgressSave(450, { source: "auto_scroll" });
         }, 900);
@@ -887,13 +971,22 @@ export default function App() {
       return;
     }
     if (progressFrame.current === null) {
+      const ticket = readerTicketRef.current;
+      const bookId = readerRef.current.book?.book_id;
       progressFrame.current = window.requestAnimationFrame(() => {
         progressFrame.current = null;
+        if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
         snapshotProgress({ source: "scroll", persistLocal: false });
       });
     }
     if (scrollTimer.current) window.clearTimeout(scrollTimer.current);
-    scrollTimer.current = window.setTimeout(() => scheduleProgressSave(450, { source: "scroll" }), 120);
+    const ticket = readerTicketRef.current;
+    const bookId = readerRef.current.book?.book_id;
+    scrollTimer.current = window.setTimeout(() => {
+      scrollTimer.current = null;
+      if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
+      scheduleProgressSave(450, { source: "scroll" });
+    }, 120);
   }
 
   async function goShelf() {
@@ -1192,8 +1285,11 @@ export default function App() {
     pendingSeekValue.current = value;
     updateReader({ pendingSeekPercent: value, visiblePercent: value, autoScrollPlaying: false });
     if (seekFrame.current !== null) return;
+    const ticket = readerTicketRef.current;
+    const bookId = readerRef.current.book?.book_id;
     seekFrame.current = window.requestAnimationFrame(() => {
       seekFrame.current = null;
+      if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
       const percent = pendingSeekValue.current;
       if (percent === null) return;
       if (readerRef.current.progressSeeking) {

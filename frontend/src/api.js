@@ -6,36 +6,43 @@ async function request(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let body = null;
     try {
-      const body = await response.json();
+      body = await response.json();
       message = body.error || message;
     } catch {
       // Keep the HTTP status as the visible error.
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    if (body && typeof body === "object") {
+      error.code = body.code;
+      error.current = body.current;
+    }
+    throw error;
   }
 
   return response.json();
 }
 
-export function getShelf(query = {}) {
+export function getShelf(query = {}, options = {}) {
   const params = buildBookQueryParams(query);
   const suffix = params.toString() ? `?${params}` : "";
-  return request(`/api/shelf${suffix}`);
+  return request(`/api/shelf${suffix}`, options);
 }
 
-export function listBooks(search = "") {
+export function listBooks(search = "", options = {}) {
   if (typeof search === "object") {
-    return listBooksWithQuery(search);
+    return listBooksWithQuery(search, options);
   }
 
-  return listBooksWithQuery({ search });
+  return listBooksWithQuery({ search }, options);
 }
 
-function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}) {
+function listBooksWithQuery({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}, options = {}) {
   const params = buildBookQueryParams({ search, status, minRating, sort, folderTag });
   const suffix = params.toString() ? `?${params}` : "";
-  return request(`/api/books${suffix}`);
+  return request(`/api/books${suffix}`, options);
 }
 
 function buildBookQueryParams({ search = "", status = "all", minRating = "", sort = "recent", folderTag = "" } = {}) {
@@ -58,8 +65,8 @@ function buildBookQueryParams({ search = "", status = "all", minRating = "", sor
   return params;
 }
 
-export function getPublicConfig() {
-  return request("/api/config");
+export function getPublicConfig(options = {}) {
+  return request("/api/config", options);
 }
 
 export function scanLibrary() {
@@ -70,20 +77,20 @@ export function scanAnimeLibrary() {
   return request("/api/anime/library/scan", { method: "POST" });
 }
 
-export function getBook(id) {
-  return request(`/api/books/${id}`);
+export function getBook(id, options = {}) {
+  return request(`/api/books/${id}`, options);
 }
 
-export function getBookContent(id) {
-  return request(`/api/books/${id}/content`);
+export function getBookContent(id, options = {}) {
+  return request(`/api/books/${id}/content`, options);
 }
 
 export function bookFileUrl(id) {
   return `/api/books/${id}/file`;
 }
 
-export function getProgress(id) {
-  return request(`/api/books/${id}/progress`);
+export function getProgress(id, options = {}) {
+  return request(`/api/books/${id}/progress`, options);
 }
 
 export function saveProgress(id, progress, options = {}) {
@@ -92,15 +99,17 @@ export function saveProgress(id, progress, options = {}) {
     headers: jsonHeaders,
     body: JSON.stringify(progress),
     keepalive: Boolean(options.keepalive),
+    signal: options.signal,
   });
 }
 
-export function saveProgressKeepalive(id, progress) {
+export function saveProgressKeepalive(id, progress, options = {}) {
   return request(`/api/books/${id}/progress`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(progress),
     keepalive: true,
+    signal: options.signal,
   });
 }
 

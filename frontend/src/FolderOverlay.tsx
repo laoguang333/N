@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, Star, X } from "lucide-react";
 import { listBooks, saveRating } from "./api";
 import { formatPercent } from "./reader";
+import { createRequestScope } from "./request-scope";
 
 const ITEMS_PER_PAGE = 9;
 
@@ -29,6 +30,8 @@ export default function FolderOverlay({
   const [error, setError] = useState("");
   const [currentPage, setCurrentPage] = useState(0);
   const [ratingBookId, setRatingBookId] = useState<number | null>(null);
+  const folderScope = useMemo(() => createRequestScope(), []);
+  const tagRef = useRef(tag);
 
   const effectiveSearch = useMemo(() => {
     const query = String(search || "").trim().toLowerCase();
@@ -40,33 +43,41 @@ export default function FolderOverlay({
   const pageBooks = books.slice(currentPage * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE + ITEMS_PER_PAGE);
 
   useEffect(() => {
-    if (!tag) return;
-    let cancelled = false;
+    tagRef.current = tag;
+  }, [tag]);
+
+  useEffect(() => {
+    if (!tag) {
+      folderScope.invalidate();
+      return;
+    }
+    const ticket = folderScope.begin();
+    const requestedTag = tag;
     setLoading(true);
     setError("");
     (listBooks as any)({
-      folderTag: tag,
+      folderTag: requestedTag,
       search: effectiveSearch,
       status,
       minRating,
       sort: sort || "title",
-    })
+    }, { signal: ticket.signal })
       .then((nextBooks: any[]) => {
-        if (!cancelled) {
-          setBooks(nextBooks);
-          setCurrentPage(0);
-        }
+        if (!folderScope.isCurrent(ticket) || requestedTag !== tagRef.current) return;
+        setBooks(nextBooks);
+        setCurrentPage(0);
       })
       .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (!folderScope.isCurrent(ticket) || requestedTag !== tagRef.current || err?.name === "AbortError") return;
+        setError(err.message);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (folderScope.isCurrent(ticket) && requestedTag === tagRef.current) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      folderScope.invalidate();
     };
-  }, [effectiveSearch, minRating, sort, status, tag]);
+  }, [effectiveSearch, folderScope, minRating, sort, status, tag]);
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
