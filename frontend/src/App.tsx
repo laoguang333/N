@@ -536,13 +536,24 @@ export default function App() {
       }
       snapshotProgress({ source: "periodic" });
       void saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true }).then(() => {
-        if (!isCurrentReaderSession(ticket, bookId)) return;
-        if (lastSaveSucceeded.current) {
-          saveFailureCount.current = 0;
+        if (isCurrentReaderSession(ticket, bookId)) {
+          if (lastSaveSucceeded.current) {
+            saveFailureCount.current = 0;
+            schedulePeriodicSave(SAVE_BASE_INTERVAL);
+          } else {
+            saveFailureCount.current += 1;
+            schedulePeriodicSave(SAVE_BASE_INTERVAL * Math.pow(4, saveFailureCount.current));
+          }
+          return;
+        }
+
+        // A was invalidated while its save was in flight.  Do not reuse A's
+        // result or failure state, but make sure the current reader session
+        // still has a periodic attempt scheduled if the switch cleared it.
+        const currentTicket = readerTicketRef.current;
+        const currentBookId = readerRef.current.book?.book_id;
+        if (currentTicket && currentBookId && isCurrentReaderSession(currentTicket, currentBookId)) {
           schedulePeriodicSave(SAVE_BASE_INTERVAL);
-        } else {
-          saveFailureCount.current += 1;
-          schedulePeriodicSave(SAVE_BASE_INTERVAL * Math.pow(4, saveFailureCount.current));
         }
       });
     }, delay);

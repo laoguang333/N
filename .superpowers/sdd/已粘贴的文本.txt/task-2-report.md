@@ -78,3 +78,22 @@
 - 清理了 Playwright 生成的 `frontend/test-results/.last-run.json` 与本轮 artifacts；未将生成物纳入提交。
 
 本轮仍未重跑并未弱化已知的 `reader-regressions.spec.js` 位置恢复失败；该问题属于 T5，原报告中的 blocker 状态保留。
+
+## T2 final fix round（2026-09-19）
+
+本轮针对最后两项 reviewer 要求完成收口：
+
+- periodic save completion 现在区分 originating reader ticket/book。A 在切换到 B 后失效时，晚到的 A completion 不会改变 B 的成功/失败状态或复用 A 的退避计数；它会为当前仍有效的 reader session 安排下一次 periodic attempt，避免 periodic loop 停止。
+- `reader-races.spec.js` 新增可控 timer/deferred API 的 periodic-save 回归：A 的 periodic save 返回失败并在切书后完成，B 仍产生实际 periodic write，且 A failure 不显示在 B。
+- `shelf-races.spec.js` 新增 debounce-window 回归：输入从 A 改为 B 后，A 响应在 B 的 180ms debounce 尚未发起期间返回；断言 A 从未可见，随后 B 正常可见。所有 `/api/**` 请求均由 route mock 处理。
+
+### Final TDD / verification evidence
+
+- RED/fixture checkpoint：periodic 回归首跑发现测试 fixture 未允许 A 的 background POST，报 `Unexpected API request: POST .../api/books/1/progress`；补齐 PUT/POST mock 后 GREEN。普通 Playwright Chromium 首跑因本机缺少 Playwright bundled executable；按要求改用 `PW_CHANNEL=chrome`，新增 debounce 用例和 periodic 用例均通过。
+- `npm run test --prefix frontend`：6 个 Vitest 文件、27 个测试通过。
+- `npm run build --prefix frontend`：通过；只有既有的大 chunk warning。
+- `cargo clippy`：通过；未修改 Rust。
+- `PW_CHANNEL=chrome npx playwright test --config frontend/playwright.config.js frontend/e2e/reader-races.spec.js frontend/e2e/shelf-races.spec.js frontend/e2e/shelf.spec.js --workers=1`：11/11 通过（reader races 4、shelf races 6、existing shelf 1）。
+- 已恢复 tracked 的 `frontend/test-results/.last-run.json`，并清理本轮生成的 test-results artifacts；没有把生成物提交。
+
+本轮仍未处理或弱化 `reader-regressions.spec.js` 的已知位置恢复失败；它属于 T5。T3/T4/T5/T7、Rust 文件和 T4 queue 均未修改。

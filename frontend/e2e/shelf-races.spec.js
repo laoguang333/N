@@ -72,6 +72,45 @@ test.describe("shelf and folder request races", () => {
     await expect(page.locator(".book-row", { hasText: "A result" })).toHaveCount(0);
   });
 
+  test("an old shelf response during the next debounce cannot become visible", async ({ page }) => {
+    const releaseA = deferred();
+    let aStarted = false;
+    let bStarted = false;
+    const aBook = book(1, "A result");
+    const bBook = book(2, "B result");
+
+    await page.route("**/api/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/api/config") return json(route, { library_dirs: ["fixture-library"] });
+      if (url.pathname === "/api/anime/tools") return json(route, { ffmpeg: null, ffprobe: null });
+      if (url.pathname === "/api/shelf") {
+        const search = url.searchParams.get("search") || "";
+        if (search === "A") {
+          aStarted = true;
+          await releaseA.promise;
+          return json(route, { items: [{ type: "book", book: aBook }], books: [aBook], folders: [] });
+        }
+        if (search === "B") {
+          bStarted = true;
+          return json(route, { items: [{ type: "book", book: bBook }], books: [bBook], folders: [] });
+        }
+        return json(route, { items: [], books: [], folders: [] });
+      }
+      throw new Error(`Unexpected API request: ${request.method()} ${request.url()}`);
+    });
+
+    await page.goto("/");
+    const search = page.getByRole("searchbox", { name: "搜索小说" });
+    await search.fill("A");
+    await expect.poll(() => aStarted).toBe(true);
+    await search.fill("B");
+    expect(bStarted).toBe(false);
+    releaseA.resolve();
+    await expect(page.locator(".book-row", { hasText: "A result" })).toHaveCount(0);
+    await expect(page.locator(".book-row", { hasText: "B result" })).toBeVisible();
+  });
+
   test("a stale shelf query error cannot replace a newer successful result", async ({ page }) => {
     const slowA = deferred();
     let aStarted = false;

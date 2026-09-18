@@ -160,6 +160,68 @@ test.describe("reader request races", () => {
     expect(bWrites.at(-1).char_offset).not.toBe(999);
   });
 
+  test("a stale periodic A save leaves B periodic attempts alive", async ({ page }) => {
+    const releaseA = deferred();
+    let aSaveStarted = false;
+    const bWrites = [];
+    const aBook = book(1, "Book A");
+    const bBook = book(2, "Book B");
+
+    await page.addInitScript(() => {
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay >= 3000 ? 40 : delay, ...args);
+      navigator.sendBeacon = () => false;
+    });
+    await page.route("**/api/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/api/config") return json(route, { library_dirs: ["fixture-library"] });
+      if (url.pathname === "/api/anime/tools") return json(route, { ffmpeg: null, ffprobe: null });
+      if (url.pathname === "/api/shelf") {
+        return json(route, {
+          items: [{ type: "book", book: aBook }, { type: "book", book: bBook }],
+          books: [aBook, bBook],
+          folders: [],
+        });
+      }
+      if (/^\/api\/books\/(1|2)$/.test(url.pathname)) {
+        const id = Number(url.pathname.split("/").at(-1));
+        return json(route, { ...(id === 1 ? aBook : bBook), book_id: id });
+      }
+      if (/^\/api\/books\/(1|2)\/progress$/.test(url.pathname) && request.method() === "GET") {
+        const id = Number(url.pathname.split("/")[3]);
+        return json(route, { book_id: id, char_offset: 10, percent: 0.1, version: 1 });
+      }
+      if (url.pathname === "/api/books/1/content") {
+        return json(route, { book_id: 1, title: "Book A", content: "A content", length: 9, encoding: "UTF-8" });
+      }
+      if (url.pathname === "/api/books/2/content") {
+        return json(route, { book_id: 2, title: "Book B", content: "B content", length: 9, encoding: "UTF-8" });
+      }
+      if (url.pathname === "/api/books/1/progress" && ["PUT", "POST"].includes(request.method())) {
+        aSaveStarted = true;
+        await releaseA.promise;
+        return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "A periodic failure" }) });
+      }
+      if (url.pathname === "/api/books/2/progress" && ["PUT", "POST"].includes(request.method())) {
+        bWrites.push(request.postDataJSON());
+        const body = request.postDataJSON();
+        return json(route, { book_id: 2, char_offset: body.char_offset, percent: body.percent, version: 1 });
+      }
+      throw new Error(`Unexpected API request: ${request.method()} ${request.url()}`);
+    });
+
+    await page.goto("/");
+    await page.locator(".book-row", { hasText: "Book A" }).click();
+    await expect(page.locator(".reader-content")).toContainText("A content");
+    await expect.poll(() => aSaveStarted).toBe(true);
+    await page.evaluate(() => { window.location.hash = "#/reader/2"; });
+    await expect(page.locator(".reader-content")).toContainText("B content");
+    releaseA.resolve();
+    await expect.poll(() => bWrites.length, { timeout: 5000 }).toBeGreaterThan(0);
+    await expect(page.getByText("A periodic failure")).toHaveCount(0);
+  });
+
   test("a stale restore callback cannot move B after switching from A", async ({ page }) => {
     await page.addInitScript(() => {
       const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
