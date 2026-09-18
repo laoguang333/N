@@ -1,5 +1,7 @@
 import { expect, test, request as playwrightRequest } from "@playwright/test";
 
+test.skip(true, "固定真实服务地址，等待替换为隔离回归");
+
 const BASE_URL = "https://127.0.0.1:234";
 
 test("real browser scroll saves and restores the current reading position", async ({ page }) => {
