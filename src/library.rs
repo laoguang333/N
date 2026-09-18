@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    fs::Metadata,
     io::ErrorKind,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
@@ -19,6 +20,7 @@ use crate::models::ScanResult;
 struct ExistingBook {
     id: i64,
     file_path: String,
+    file_hash: String,
     size: i64,
     mtime: i64,
 }
@@ -144,6 +146,34 @@ async fn scan_library_inner_impl(
             let file_path = canonical_path.to_string_lossy().to_string();
             seen_paths.insert(file_path);
 
+            let metadata = match fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    result
+                        .errors
+                        .push(format!("failed to scan {}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            let existing = match existing_book_by_path(db, &canonical_path.to_string_lossy()).await
+            {
+                Ok(existing) => existing,
+                Err(error) => {
+                    result
+                        .errors
+                        .push(format!("failed to scan {}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            if existing.as_ref().is_some_and(|existing| {
+                existing.size == metadata.len() as i64
+                    && file_mtime(&metadata) == existing.mtime
+                    && !existing.file_hash.is_empty()
+            }) {
+                result.skipped += 1;
+                continue;
+            }
+
             #[cfg(test)]
             if _scan_options.is_some_and(|fault_path| fault_path == path) {
                 result.errors.push(format!(
@@ -153,7 +183,14 @@ async fn scan_library_inner_impl(
                 continue;
             }
 
-            let scanned = match prepare_scan_file(&path, &canonical_path, &canonical_roots).await {
+            let scanned = match prepare_scan_file(
+                &path,
+                &canonical_path,
+                &canonical_roots,
+                &metadata,
+            )
+            .await
+            {
                 Ok(scanned) => scanned,
                 Err(error) => {
                     result
@@ -197,9 +234,24 @@ async fn scan_library_inner_impl(
     let cleanup_allowed = result.errors.is_empty() && !created_any_root;
     result.cleanup_skipped = !cleanup_allowed;
     if cleanup_allowed {
-        result.removed =
-            remove_missing_books(db, library_dirs, recursive, &seen_paths, &mut result.errors)
+        match canonical_library_roots(library_dirs) {
+            Ok(library_roots) => {
+                result.removed = remove_missing_books(
+                    db,
+                    &library_roots,
+                    recursive,
+                    &seen_paths,
+                    &mut result.errors,
+                )
                 .await?;
+            }
+            Err(error) => {
+                result.errors.push(format!(
+                    "missing cleanup skipped because library roots could not be verified: {error:#}"
+                ));
+                result.cleanup_skipped = true;
+            }
+        }
     }
 
     tracing::info!(
@@ -275,18 +327,13 @@ async fn prepare_scan_file(
     path: &Path,
     canonical_path: &Path,
     library_roots: &[PathBuf],
+    metadata: &Metadata,
 ) -> anyhow::Result<ScannedBookFile> {
-    let metadata = fs::metadata(path).await?;
     let bytes = read_all(path).await?;
     let file_hash = format!("{:x}", Sha256::digest(&bytes));
     let file_path = canonical_path.to_string_lossy().to_string();
     let size = metadata.len() as i64;
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default();
+    let mtime = file_mtime(metadata);
     let folder_tag = compute_folder_tag(&file_path, library_roots);
     let format = book_format(path)?;
     let encoding = if format == "txt" { "TEXT" } else { "EPUB" }.to_string();
@@ -308,7 +355,10 @@ async fn apply_scan_result(
     scanned: &ScannedBookFile,
 ) -> anyhow::Result<BookScanOutcome> {
     if let Some(existing) = existing_book_by_path(db, &scanned.file_path).await? {
-        if existing.size == scanned.size && existing.mtime == scanned.mtime {
+        if existing.size == scanned.size
+            && existing.mtime == scanned.mtime
+            && !existing.file_hash.is_empty()
+        {
             return Ok(BookScanOutcome::Skipped);
         }
         update_book(db, existing.id, scanned).await?;
@@ -381,10 +431,11 @@ async fn existing_book_by_path(
     db: &SqlitePool,
     file_path: &str,
 ) -> anyhow::Result<Option<ExistingBook>> {
-    let row = sqlx::query("SELECT id, file_path, size, mtime FROM books WHERE file_path = ?1")
-        .bind(file_path)
-        .fetch_optional(db)
-        .await?;
+    let row =
+        sqlx::query("SELECT id, file_path, file_hash, size, mtime FROM books WHERE file_path = ?1")
+            .bind(file_path)
+            .fetch_optional(db)
+            .await?;
 
     Ok(row.map(existing_book_from_row).transpose()?)
 }
@@ -393,10 +444,11 @@ async fn existing_book_by_hash(
     db: &SqlitePool,
     file_hash: &str,
 ) -> anyhow::Result<Option<ExistingBook>> {
-    let rows = sqlx::query("SELECT id, file_path, size, mtime FROM books WHERE file_hash = ?1")
-        .bind(file_hash)
-        .fetch_all(db)
-        .await?;
+    let rows =
+        sqlx::query("SELECT id, file_path, file_hash, size, mtime FROM books WHERE file_hash = ?1")
+            .bind(file_hash)
+            .fetch_all(db)
+            .await?;
 
     for row in rows {
         let existing = existing_book_from_row(row)?;
@@ -413,6 +465,7 @@ fn existing_book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ExistingBook, 
     Ok(ExistingBook {
         id: row.try_get("id")?,
         file_path: row.try_get("file_path")?,
+        file_hash: row.try_get("file_hash")?,
         size: row.try_get("size")?,
         mtime: row.try_get("mtime")?,
     })
@@ -472,6 +525,15 @@ fn title_from_path(path: &Path) -> String {
         .to_string()
 }
 
+fn file_mtime(metadata: &Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 pub async fn read_book_content(path: &str) -> anyhow::Result<(String, String)> {
     let bytes = read_all(Path::new(path)).await?;
     let encoding = detect_encoding(&bytes);
@@ -482,12 +544,11 @@ pub async fn read_book_content(path: &str) -> anyhow::Result<(String, String)> {
 
 async fn remove_missing_books(
     db: &SqlitePool,
-    library_dirs: &[String],
+    library_roots: &[PathBuf],
     recursive: bool,
     seen_paths: &HashSet<String>,
     errors: &mut Vec<String>,
 ) -> anyhow::Result<usize> {
-    let library_roots = canonical_library_roots(library_dirs)?;
     let rows = sqlx::query("SELECT id, file_path FROM books")
         .fetch_all(db)
         .await?;
@@ -514,7 +575,7 @@ async fn remove_missing_books(
             Err(_) => {}
         }
 
-        if is_library_file(&path, &library_roots, recursive) {
+        if is_library_file(&path, library_roots, recursive) {
             sqlx::query("DELETE FROM books WHERE id = ?1")
                 .bind(id)
                 .execute(db)
@@ -530,9 +591,18 @@ fn canonical_library_roots(library_dirs: &[String]) -> anyhow::Result<Vec<PathBu
     library_dirs
         .iter()
         .map(|dir| {
-            PathBuf::from(dir)
+            let canonical = PathBuf::from(dir)
                 .canonicalize()
-                .with_context(|| format!("failed to canonicalize library directory {dir}"))
+                .with_context(|| format!("failed to canonicalize library directory {dir}"))?;
+            let metadata = std::fs::metadata(&canonical)
+                .with_context(|| format!("failed to inspect canonical library directory {dir}"))?;
+            if !metadata.is_dir() {
+                return Err(anyhow!(
+                    "library root is not a directory: {}",
+                    canonical.display()
+                ));
+            }
+            Ok(canonical)
         })
         .collect()
 }
@@ -754,6 +824,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_empty_hash_is_backfilled_before_move() {
+        let fixture = TestFixture::new("scan-legacy-hash-move").await;
+        let old_path = fixture.library.join("Old.txt");
+        let new_path = fixture.library.join("New.txt");
+        fs::write(&old_path, "same content").await.unwrap();
+
+        scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'Old'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE books SET file_hash = '', rating = 5 WHERE id = ?1")
+            .bind(id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 4, 0.5)",
+        )
+        .bind(id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+
+        let backfill = scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        assert_eq!(backfill.updated, 1);
+        let hash: String = sqlx::query_scalar("SELECT file_hash FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        assert!(!hash.is_empty());
+
+        fs::rename(&old_path, &new_path).await.unwrap();
+        let moved = scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+        assert_eq!(moved.added, 0);
+        assert_eq!(moved.removed, 0);
+
+        let new_id: i64 = sqlx::query_scalar("SELECT id FROM books WHERE title = 'New'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        assert_eq!(new_id, id);
+        let rating: Option<i64> = sqlx::query_scalar("SELECT rating FROM books WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+        let progress: f64 =
+            sqlx::query_scalar("SELECT percent FROM reading_progress WHERE book_id = ?1")
+                .bind(id)
+                .fetch_one(&fixture.db)
+                .await
+                .unwrap();
+        assert_eq!(rating, Some(5));
+        assert_eq!(progress, 0.5);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn scan_includes_epub_files() {
         let fixture = TestFixture::new("scan-epub").await;
         fs::write(fixture.library.join("Book.epub"), b"not a real epub")
@@ -918,6 +1055,11 @@ mod tests {
             .execute(&fixture.db)
             .await
             .unwrap();
+        sqlx::query("UPDATE books SET file_hash = '' WHERE id = ?1")
+            .bind(id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO reading_progress (book_id, char_offset, percent) VALUES (?1, 3, 0.6)",
         )
@@ -952,6 +1094,27 @@ mod tests {
         assert_eq!(stored_path, book.canonicalize().unwrap().to_string_lossy());
         assert_eq!(rating, 4);
         assert_eq!(percent, 0.6);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn unchanged_modern_file_skips_read_fault_and_hashing() {
+        let fixture = TestFixture::new("scan-fast-path").await;
+        let book = fixture.library.join("Keep.txt");
+        fs::write(&book, "hello").await.unwrap();
+        scan_library(&fixture.db, &[fixture.library_dir()], false)
+            .await
+            .unwrap();
+
+        let result =
+            scan_library_with_read_fault(&fixture.db, &[fixture.library_dir()], false, &book)
+                .await
+                .unwrap();
+
+        assert!(result.errors.is_empty());
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.updated, 0);
 
         fixture.cleanup().await;
     }

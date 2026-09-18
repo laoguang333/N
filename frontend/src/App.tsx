@@ -562,6 +562,7 @@ export default function App() {
         `更新 ${result.updated || 0} 本`,
         `跳过 ${result.skipped || 0} 本`,
         `移除 ${result.removed} 本`,
+        ...(result.cleanup_skipped ? ["本次未执行缺失清理，旧记录已保留"] : []),
         ...(result.errors?.length ? [`错误 ${result.errors.length} 个`] : []),
       ].join(" · ");
       updateShelf({ scanMessage });
