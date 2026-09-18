@@ -55,3 +55,26 @@
 - 已发出的保存请求不会因切书被当作回滚；晚到响应只按其原 book id 处理。
 - reader 位置恢复的既有回归仍未解决，见验证结果。
 - 本轮没有章节识别、LLM、全文索引数据库、软删除管理、全项目重构，也没有实现 T3/T4/T5/T7。
+
+## T2 reviewer fix round（2026-09-19）
+
+本轮修复并验证了以下 reviewer findings：
+
+- reader save race 现在在 A 响应完成后强制 B 真实滚动并等待 B 的实际写请求；断言 B 至少产生一笔写入，且最后一笔不包含 A 的 `char_offset=999`。
+- shelf rating 保存捕获独立 rating ticket 和查询 key；查询变化、更新操作变化、旧错误/成功响应都不能污染当前 shelf。
+- FolderOverlay rating 保存捕获独立 rating ticket、folder tag 和 folder query key；切换 folder 或关闭后旧响应/错误不再修改当前弹层。
+- `saveEpubProgress` 在 `cacheProgress` 和 `updateReader` 前验证 captured book/ticket；异步响应仍验证 `saved.book_id`。
+- periodic save 的 timer、completion、成功/失败退避都按 originating reader ticket/book id fence；旧 A save completion 不会按 A 状态安排或影响 B 的下一轮。
+- 新增了可控延迟的 shelf 旧查询 error、stale shelf rating error、stale folder rating error，以及 requestAnimationFrame hold/release 的 stale restore 回归。
+
+### Fix-round TDD evidence
+
+- RED：更新后的 8 项 race suite 先得到 5 passed / 3 failed；两个失败是 shelf/folder stale rating error，另一个是 stale-restore 测试 fixture 未 mock 生产代码会发出的 progress POST。补齐 fixture 后单独运行 stale-restore 用例通过，rating 失败保持为预期生产缺陷证据。
+- GREEN：同一 focused race suite 在生产 fences 加入后 8/8 通过。
+- 最终 focused suite（race + existing shelf）：9/9 通过，使用 Chrome 与 controllable mock delays。
+- `npm run test --prefix frontend`：6 个 Vitest 文件、27 个测试通过。
+- `npm run build --prefix frontend`：通过；仍只有既有 chunk-size warning。
+- `cargo clippy`：通过；没有 Rust 变更。
+- 清理了 Playwright 生成的 `frontend/test-results/.last-run.json` 与本轮 artifacts；未将生成物纳入提交。
+
+本轮仍未重跑并未弱化已知的 `reader-regressions.spec.js` 位置恢复失败；该问题属于 T5，原报告中的 blocker 状态保留。

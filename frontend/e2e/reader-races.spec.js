@@ -67,6 +67,11 @@ test.describe("reader request races", () => {
       if (url.pathname === "/api/books/2/content") {
         return json(route, { book_id: 2, title: "Book B", content: "B current content", length: 16, encoding: "UTF-8" });
       }
+      if (/^\/api\/books\/(1|2)\/progress$/.test(url.pathname) && ["PUT", "POST"].includes(request.method())) {
+        const body = request.postDataJSON() || {};
+        const id = Number(url.pathname.split("/")[3]);
+        return json(route, { book_id: id, char_offset: body.char_offset || 0, percent: body.percent || 0, version: 1 });
+      }
       throw new Error(`Unexpected API request: ${request.method()} ${request.url()}`);
     });
 
@@ -85,6 +90,7 @@ test.describe("reader request races", () => {
   test("a late A save cannot apply an A payload to B", async ({ page }) => {
     const slowASave = deferred();
     let aSaveStarted = false;
+    let aSaveFinished = false;
     const aBook = book(1, "Book A");
     const bBook = book(2, "Book B");
     const bWrites = [];
@@ -121,6 +127,7 @@ test.describe("reader request races", () => {
       if (url.pathname === "/api/books/1/progress" && request.method() === "POST") {
         aSaveStarted = true;
         await slowASave.promise;
+        aSaveFinished = true;
         return json(route, { book_id: 2, char_offset: 999, percent: 0.99, version: 1 });
       }
       if (url.pathname === "/api/books/2/progress" && ["PUT", "POST"].includes(request.method())) {
@@ -142,8 +149,81 @@ test.describe("reader request races", () => {
     await expect.poll(() => aSaveStarted).toBe(true);
     await expect(page.locator(".reader-content")).toContainText("B content");
     slowASave.resolve();
+    await expect.poll(() => aSaveFinished).toBe(true);
+    await page.locator(".reader-content").evaluate((element) => {
+      element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) * 0.35);
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => bWrites.length).toBeGreaterThan(0);
     await expect(page.locator(".reader-title")).toContainText("Book B");
     await expect(page.locator(".reader-content")).not.toContainText("999");
-    expect(bWrites.every((payload) => payload.char_offset !== 999)).toBe(true);
+    expect(bWrites.at(-1).char_offset).not.toBe(999);
+  });
+
+  test("a stale restore callback cannot move B after switching from A", async ({ page }) => {
+    await page.addInitScript(() => {
+      const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+      const queued = [];
+      let held = false;
+      window.__holdReaderFrames = (next) => {
+        held = next;
+        if (!held) {
+          const callbacks = queued.splice(0);
+          callbacks.filter(Boolean).forEach((callback) => nativeRequestAnimationFrame(callback));
+        }
+      };
+      window.requestAnimationFrame = (callback) => {
+        if (!held) return nativeRequestAnimationFrame(callback);
+        queued.push(callback);
+        return queued.length;
+      };
+    });
+    const aBook = book(1, "Book A");
+    const bBook = book(2, "Book B");
+
+    await page.route("**/api/**", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/api/config") return json(route, { library_dirs: ["fixture-library"] });
+      if (url.pathname === "/api/anime/tools") return json(route, { ffmpeg: null, ffprobe: null });
+      if (url.pathname === "/api/shelf") {
+        return json(route, {
+          items: [{ type: "book", book: aBook }, { type: "book", book: bBook }],
+          books: [aBook, bBook],
+          folders: [],
+        });
+      }
+      if (/^\/api\/books\/(1|2)$/.test(url.pathname)) {
+        const id = Number(url.pathname.split("/").at(-1));
+        return json(route, { ...(id === 1 ? aBook : bBook), book_id: id });
+      }
+      if (/^\/api\/books\/(1|2)\/progress$/.test(url.pathname) && request.method() === "GET") {
+        const id = Number(url.pathname.split("/")[3]);
+        return json(route, id === 1 ? { book_id: 1, char_offset: 120, percent: 0.8, version: 1 } : null);
+      }
+      if (url.pathname === "/api/books/1/content") {
+        return json(route, { book_id: 1, title: "Book A", content: "A restore target\n\n".repeat(80), length: 1440, encoding: "UTF-8" });
+      }
+      if (url.pathname === "/api/books/2/content") {
+        return json(route, { book_id: 2, title: "Book B", content: "B current content", length: 16, encoding: "UTF-8" });
+      }
+      if (/^\/api\/books\/(1|2)\/progress$/.test(url.pathname) && ["PUT", "POST"].includes(request.method())) {
+        const body = request.postDataJSON() || {};
+        const id = Number(url.pathname.split("/")[3]);
+        return json(route, { book_id: id, char_offset: body.char_offset || 0, percent: body.percent || 0, version: 1 });
+      }
+      throw new Error(`Unexpected API request: ${request.method()} ${request.url()}`);
+    });
+
+    await page.goto("/");
+    await page.evaluate(() => window.__holdReaderFrames(true));
+    await page.locator(".book-row", { hasText: "Book A" }).click();
+    await expect(page.locator(".reader-content")).toContainText("A restore target");
+    await page.evaluate(() => { window.location.hash = "#/reader/2"; });
+    await expect(page.locator(".reader-title")).toContainText("Book B");
+    await expect(page.locator(".reader-content")).toContainText("B current content");
+    await page.evaluate(() => window.__holdReaderFrames(false));
+    await expect(page.locator(".reader-title")).toContainText("Book B");
+    await expect(page.locator(".reader-content")).not.toContainText("A restore target");
   });
 });

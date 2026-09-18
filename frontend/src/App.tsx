@@ -235,7 +235,9 @@ export default function App() {
   const matchMap = useRef<Map<number, any[]> | null>(null);
   const readerRef = useRef(reader);
   const routeRef = useRef(route);
+  const shelfRef = useRef(shelf);
   const shelfScope = useMemo(() => createRequestScope(), []);
+  const shelfRatingScope = useMemo(() => createRequestScope(), []);
   const readerScope = useMemo(() => createRequestScope(), []);
   const readerTicketRef = useRef<any>(null);
 
@@ -262,6 +264,7 @@ export default function App() {
 
   useEffect(() => { readerRef.current = reader; }, [reader]);
   useEffect(() => { routeRef.current = route; }, [route]);
+  useEffect(() => { shelfRef.current = shelf; }, [shelf]);
 
   const readingTap = useMemo(() => createReadingTapHandler(() => {
     const current = readerRef.current;
@@ -513,6 +516,38 @@ export default function App() {
     updateReader({ visiblePercent: currentScrollPercent() });
   }, [currentScrollPercent]);
 
+  const schedulePeriodicSave = useCallback((delay = SAVE_BASE_INTERVAL) => {
+    if (periodicSaveTimer.current) window.clearTimeout(periodicSaveTimer.current);
+    const scheduledTicket = readerTicketRef.current;
+    const scheduledBookId = readerRef.current.book?.book_id;
+    periodicSaveTimer.current = window.setTimeout(() => {
+      periodicSaveTimer.current = null;
+      const ticket = scheduledTicket || readerTicketRef.current;
+      const bookId = scheduledBookId || readerRef.current.book?.book_id;
+      if (!ticket || !bookId) {
+        schedulePeriodicSave(SAVE_BASE_INTERVAL);
+        return;
+      }
+      if (!isCurrentReaderSession(ticket, bookId)) return;
+      const currentReader = readerRef.current;
+      if (!canSaveReaderProgress() || currentReader.loading) {
+        schedulePeriodicSave(SAVE_BASE_INTERVAL);
+        return;
+      }
+      snapshotProgress({ source: "periodic" });
+      void saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true }).then(() => {
+        if (!isCurrentReaderSession(ticket, bookId)) return;
+        if (lastSaveSucceeded.current) {
+          saveFailureCount.current = 0;
+          schedulePeriodicSave(SAVE_BASE_INTERVAL);
+        } else {
+          saveFailureCount.current += 1;
+          schedulePeriodicSave(SAVE_BASE_INTERVAL * Math.pow(4, saveFailureCount.current));
+        }
+      });
+    }, delay);
+  }, [canSaveReaderProgress, saveProgressNow, snapshotProgress]);
+
   const scheduleShelfMeasure = useCallback(() => {
     if (routeRef.current.name !== "shelf") return;
     if (shelfMeasureFrame.current) window.cancelAnimationFrame(shelfMeasureFrame.current);
@@ -685,6 +720,7 @@ export default function App() {
     clearReaderAsyncWork();
     const ticket = readerScope.begin();
     readerTicketRef.current = ticket;
+    schedulePeriodicSave(SAVE_BASE_INTERVAL);
     const requestId = ++openRequestId.current;
     navigationId.current += 1;
     updateReader({
@@ -757,19 +793,21 @@ export default function App() {
       updateReader({ error: (error as Error).message, loading: false });
       restoreSavingBlocked.current = false;
     }
-  }, [clearReaderAsyncWork, offsetForPercent, readerScope, scheduleProgressSave, updateVisibleProgress]);
+  }, [clearReaderAsyncWork, offsetForPercent, readerScope, schedulePeriodicSave, scheduleProgressSave, updateVisibleProgress]);
 
   const saveEpubProgress = useCallback(async (nextProgress: { percent: number; locator: string | null }) => {
     const currentReader = readerRef.current;
     if (!currentReader.book) return;
     const savingBookId = currentReader.book.book_id;
     const savingTicket = readerTicketRef.current;
+    if (!isCurrentReaderSession(savingTicket, savingBookId)) return;
     const progress = cacheProgress(currentReader.book.book_id, {
       book_id: currentReader.book.book_id,
       char_offset: 0,
       percent: nextProgress.percent,
       locator: nextProgress.locator,
     }, { dirty: true });
+    if (!isCurrentReaderSession(savingTicket, savingBookId)) return;
     updateReader({ progress, visiblePercent: progress?.percent || 0 });
     if (!progress) return;
     try {
@@ -841,6 +879,7 @@ export default function App() {
   useEffect(() => {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
     shelfScope.invalidate();
+    shelfRatingScope.invalidate();
     shelfTimer.current = window.setTimeout(() => void loadBooks(), 180);
     return () => {
       if (shelfTimer.current) {
@@ -848,7 +887,7 @@ export default function App() {
         shelfTimer.current = null;
       }
     };
-  }, [loadBooks, shelf.search, shelf.status, shelf.minRating, shelf.sort, shelfScope]);
+  }, [loadBooks, shelf.search, shelf.status, shelf.minRating, shelf.sort, shelfRatingScope, shelfScope]);
 
   useEffect(() => {
     if (route.name !== "tab-a") return;
@@ -878,28 +917,6 @@ export default function App() {
         scheduleProgressSave(300, { source: "interaction_end" });
       }
     }
-    function scheduleNextPeriodicSave(delay = SAVE_BASE_INTERVAL) {
-      if (periodicSaveTimer.current) window.clearTimeout(periodicSaveTimer.current);
-      periodicSaveTimer.current = window.setTimeout(periodicProgressSave, delay);
-    }
-    function periodicProgressSave() {
-      const currentReader = readerRef.current;
-      if (!canSaveReaderProgress() || currentReader.loading) {
-        scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
-        return;
-      }
-      snapshotProgress({ source: "periodic" });
-      saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true }).then(() => {
-        if (lastSaveSucceeded.current) {
-          saveFailureCount.current = 0;
-          scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
-        } else {
-          saveFailureCount.current += 1;
-          scheduleNextPeriodicSave(SAVE_BASE_INTERVAL * Math.pow(4, saveFailureCount.current));
-        }
-      });
-    }
-
     window.addEventListener("beforeunload", flushProgress);
     window.addEventListener("pagehide", flushProgress);
     window.addEventListener("touchend", onReaderInteractionEnd, { passive: true });
@@ -907,7 +924,7 @@ export default function App() {
     window.addEventListener("resize", scheduleShelfMeasure, { passive: true });
     window.addEventListener("resize", scheduleAnimeMeasure, { passive: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
-    scheduleNextPeriodicSave(SAVE_BASE_INTERVAL);
+    schedulePeriodicSave(SAVE_BASE_INTERVAL);
     return () => {
       window.removeEventListener("beforeunload", flushProgress);
       window.removeEventListener("pagehide", flushProgress);
@@ -924,7 +941,7 @@ export default function App() {
       if (shelfMeasureFrame.current) window.cancelAnimationFrame(shelfMeasureFrame.current);
       if (animeMeasureFrame.current) window.cancelAnimationFrame(animeMeasureFrame.current);
     };
-  }, [canSaveReaderProgress, saveProgressInBackground, saveProgressNow, scheduleAnimeMeasure, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
+  }, [canSaveReaderProgress, saveProgressInBackground, scheduleAnimeMeasure, schedulePeriodicSave, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
 
   useEffect(() => {
     if (searchDebounceTimer.current) window.clearTimeout(searchDebounceTimer.current);
@@ -1257,16 +1274,24 @@ export default function App() {
 
   async function updateRating(book: any, rating: number) {
     const nextRating = book.rating === rating ? null : rating;
+    const ticket = shelfRatingScope.begin();
+    const queryKey = JSON.stringify([shelf.search, shelf.status, shelf.minRating, shelf.sort]);
     updateShelf({ ratingBookId: book.id, error: "" });
     try {
       const updated = await saveRating(book.id, nextRating);
+      if (!shelfRatingScope.isCurrent(ticket) || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) return;
       updateShelf((current) => ({
         ...current,
         items: current.items.map((item) => item.type === "book" && item.id === book.id ? { type: "book", ...updated } : item),
         ratingBookId: null,
       }));
     } catch (error) {
+      if (!shelfRatingScope.isCurrent(ticket) || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort]) || isAbortError(error)) return;
       updateShelf({ error: (error as Error).message, ratingBookId: null });
+    } finally {
+      if (shelfRatingScope.isCurrent(ticket) && queryKey === JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) {
+        updateShelf((current) => current.ratingBookId === book.id ? { ...current, ratingBookId: null } : current);
+      }
     }
   }
 

@@ -31,7 +31,10 @@ export default function FolderOverlay({
   const [currentPage, setCurrentPage] = useState(0);
   const [ratingBookId, setRatingBookId] = useState<number | null>(null);
   const folderScope = useMemo(() => createRequestScope(), []);
+  const folderRatingScope = useMemo(() => createRequestScope(), []);
   const tagRef = useRef(tag);
+  const queryKey = JSON.stringify([tag, search, status, minRating, sort]);
+  const queryKeyRef = useRef(queryKey);
 
   const effectiveSearch = useMemo(() => {
     const query = String(search || "").trim().toLowerCase();
@@ -44,11 +47,13 @@ export default function FolderOverlay({
 
   useEffect(() => {
     tagRef.current = tag;
-  }, [tag]);
+    queryKeyRef.current = queryKey;
+  }, [queryKey, tag]);
 
   useEffect(() => {
     if (!tag) {
       folderScope.invalidate();
+      folderRatingScope.invalidate();
       return;
     }
     const ticket = folderScope.begin();
@@ -76,8 +81,9 @@ export default function FolderOverlay({
       });
     return () => {
       folderScope.invalidate();
+      folderRatingScope.invalidate();
     };
-  }, [effectiveSearch, folderScope, minRating, sort, status, tag]);
+  }, [effectiveSearch, folderRatingScope, folderScope, minRating, sort, status, tag]);
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
@@ -97,15 +103,22 @@ export default function FolderOverlay({
 
   async function updateRating(book: any, rating: number) {
     const nextRating = book.rating === rating ? null : rating;
+    const ticket = folderRatingScope.begin();
+    const requestedTag = tag;
+    const requestedQueryKey = queryKey;
     setRatingBookId(book.id);
     setError("");
     try {
       const updated = await saveRating(book.id, nextRating);
+      if (!folderRatingScope.isCurrent(ticket) || requestedTag !== tagRef.current || requestedQueryKey !== queryKeyRef.current) return;
       setBooks((items) => items.map((item) => (item.id === book.id ? updated : item)));
     } catch (err) {
+      if (!folderRatingScope.isCurrent(ticket) || requestedTag !== tagRef.current || requestedQueryKey !== queryKeyRef.current || (err as Error)?.name === "AbortError") return;
       setError((err as Error).message);
     } finally {
-      setRatingBookId(null);
+      if (folderRatingScope.isCurrent(ticket) && requestedTag === tagRef.current && requestedQueryKey === queryKeyRef.current) {
+        setRatingBookId((current) => current === book.id ? null : current);
+      }
     }
   }
 
