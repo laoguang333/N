@@ -123,6 +123,41 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
             .await?;
     }
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS reading_progress_mutations (
+            mutation_id TEXT PRIMARY KEY NOT NULL,
+            book_id INTEGER NOT NULL,
+            char_offset INTEGER NOT NULL,
+            percent REAL NOT NULL,
+            locator TEXT,
+            position_kind TEXT,
+            paragraph_fraction REAL,
+            version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO reading_progress_mutations (
+            mutation_id, book_id, char_offset, percent, locator,
+            position_kind, paragraph_fraction, version, updated_at
+        )
+        SELECT
+            last_mutation_id, book_id, char_offset, percent, locator,
+            position_kind, paragraph_fraction, version, updated_at
+        FROM reading_progress
+        WHERE last_mutation_id IS NOT NULL
+        ON CONFLICT(mutation_id) DO NOTHING;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_books_rating ON books(rating);")
         .execute(db)
         .await?;
@@ -302,6 +337,12 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        sqlx::query(
+            "UPDATE reading_progress SET last_mutation_id = 'legacy-mutation' WHERE book_id = 7",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
         migrate(&db).await.unwrap();
 
         let book = sqlx::query("SELECT title, rating FROM books WHERE id = 7")
@@ -324,9 +365,23 @@ mod tests {
             row.get::<Option<String>, _>("locator").as_deref(),
             Some("legacy-locator")
         );
-        assert_eq!(row.get::<Option<String>, _>("last_mutation_id"), None);
+        assert_eq!(
+            row.get::<Option<String>, _>("last_mutation_id").as_deref(),
+            Some("legacy-mutation")
+        );
         assert_eq!(row.get::<Option<String>, _>("position_kind"), None);
         assert_eq!(row.get::<Option<f64>, _>("paragraph_fraction"), None);
+
+        let mutation = sqlx::query(
+            "SELECT mutation_id, book_id, char_offset, version FROM reading_progress_mutations WHERE mutation_id = 'legacy-mutation'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(mutation.get::<String, _>("mutation_id"), "legacy-mutation");
+        assert_eq!(mutation.get::<i64, _>("book_id"), 7);
+        assert_eq!(mutation.get::<i64, _>("char_offset"), 42);
+        assert_eq!(mutation.get::<i64, _>("version"), 9);
 
         db.close().await;
         let _ = std::fs::remove_dir_all(dir);

@@ -215,8 +215,10 @@ EPUB 进度使用 CFI：
 
 `char_offset` 小于 0 时按 0 保存；`percent` 会被限制到 `0..1`，非有限数会返回 400。
 服务端按 `base_version` 做条件更新，旧版本不会覆盖当前进度。相同 `mutation_id` 与完全相同
-载荷的重试返回原确认记录（HTTP 200），不会递增 `version` 或 `updated_at`；相同 mutation
-但载荷不同，或其他版本冲突，返回 HTTP 409、错误码 `progress_conflict`，并带当前记录。
+载荷的重试返回原确认记录（HTTP 200），不会递增 `version` 或 `updated_at`。`mutation_id`
+是全局写入 ID：不能用于另一本文本、另一位置或另一载荷；违反时返回 HTTP 409、错误码
+`progress_conflict`，并在 `current` 中标识已占用该 ID 的进度记录。
+其他版本冲突同样返回 HTTP 409、错误码 `progress_conflict`，并带当前记录。
 首次写入使用 `base_version: 0`。旧数据库记录的 `mutation_id`、`position_kind` 和
 `paragraph_fraction` 保持为 `null`，直到新协议写入这些字段。
 

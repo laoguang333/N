@@ -1310,7 +1310,32 @@ async fn save_progress(
     let allow_backward = payload.allow_backward.unwrap_or(false);
 
     let (title, _, _) = require_book(&state.db, id).await?;
+    let existing_mutation = fetch_mutation(&state.db, mutation_id).await?;
     let mut tx = state.db.begin().await?;
+
+    if let Some(existing) = existing_mutation {
+        if existing.book_id == id
+            && progress_payload_matches(
+                &existing,
+                char_offset,
+                percent,
+                payload.locator.as_deref(),
+                position_kind,
+                payload.paragraph_fraction,
+            )
+        {
+            tx.commit().await?;
+            return Ok(Json(existing));
+        }
+
+        return Err(AppError::ProgressConflict {
+            message: format!(
+                "mutation_id {mutation_id} was already used for book {}",
+                existing.book_id
+            ),
+            current: Some(Box::new(existing)),
+        });
+    }
 
     let saved = if base_version == 0 {
         sqlx::query(
@@ -1414,6 +1439,36 @@ async fn save_progress(
             });
         }
     };
+
+    let registered: Option<String> = sqlx::query_scalar(
+        r#"
+        INSERT INTO reading_progress_mutations (
+            mutation_id, book_id, char_offset, percent, locator,
+            position_kind, paragraph_fraction, version, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(mutation_id) DO NOTHING
+        RETURNING mutation_id
+        "#,
+    )
+    .bind(mutation_id)
+    .bind(saved.book_id)
+    .bind(saved.char_offset)
+    .bind(saved.percent)
+    .bind(saved.locator.as_deref())
+    .bind(saved.position_kind.as_deref())
+    .bind(saved.paragraph_fraction)
+    .bind(saved.version)
+    .bind(&saved.updated_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if registered.is_none() {
+        let existing = fetch_mutation_with_connection(&mut tx, mutation_id).await?;
+        return Err(AppError::ProgressConflict {
+            message: format!("mutation_id {mutation_id} was already used"),
+            current: existing.map(Box::new),
+        });
+    }
 
     tx.commit().await?;
     tracing::info!(
@@ -1561,6 +1616,48 @@ async fn fetch_progress_with_connection(
         "SELECT book_id, char_offset, percent, locator, version, last_mutation_id, position_kind, paragraph_fraction, updated_at FROM reading_progress WHERE book_id = ?1",
     )
     .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    row.map(progress_from_row).transpose()
+}
+
+async fn fetch_mutation(
+    db: &SqlitePool,
+    mutation_id: &str,
+) -> Result<Option<ReadingProgress>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            book_id, char_offset, percent, locator,
+            mutation_id AS last_mutation_id, position_kind,
+            paragraph_fraction, version, updated_at
+        FROM reading_progress_mutations
+        WHERE mutation_id = ?1
+        "#,
+    )
+    .bind(mutation_id)
+    .fetch_optional(db)
+    .await?;
+
+    row.map(progress_from_row).transpose()
+}
+
+async fn fetch_mutation_with_connection(
+    db: &mut sqlx::SqliteConnection,
+    mutation_id: &str,
+) -> Result<Option<ReadingProgress>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            book_id, char_offset, percent, locator,
+            mutation_id AS last_mutation_id, position_kind,
+            paragraph_fraction, version, updated_at
+        FROM reading_progress_mutations
+        WHERE mutation_id = ?1
+        "#,
+    )
+    .bind(mutation_id)
     .fetch_optional(db)
     .await?;
 
@@ -2105,6 +2202,52 @@ mod tests {
             statuses.contains(&StatusCode::CONFLICT),
             "statuses: {statuses:?}"
         );
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn progress_mutation_id_cannot_be_reused_for_another_book() {
+        let fixture = TestFixture::new("progress-cross-book-mutation").await;
+        let book_a = fixture.insert_book("Book A", -1.0, None).await;
+        let book_b = fixture.insert_book("Book B", -1.0, None).await;
+        let first_payload = SaveProgressRequest {
+            mutation_id: Some("global-mutation-1".to_string()),
+            base_version: Some(0),
+            ..progress_request_defaults()
+        };
+
+        let _ = save_progress(
+            State(fixture.state.clone()),
+            Path(book_a),
+            HeaderMap::new(),
+            Json(first_payload.clone()),
+        )
+        .await
+        .unwrap();
+
+        let reused = save_progress(
+            State(fixture.state.clone()),
+            Path(book_b),
+            HeaderMap::new(),
+            Json(first_payload),
+        )
+        .await
+        .unwrap_err();
+        let response = reused.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "progress_conflict");
+        assert_eq!(body["current"]["book_id"], book_a);
+
+        let book_b_progress: Option<i64> =
+            sqlx::query_scalar("SELECT book_id FROM reading_progress WHERE book_id = ?1")
+                .bind(book_b)
+                .fetch_optional(&fixture.state.db)
+                .await
+                .unwrap();
+        assert_eq!(book_b_progress, None);
 
         fixture.cleanup().await;
     }

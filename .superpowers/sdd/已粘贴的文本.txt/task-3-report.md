@@ -30,6 +30,22 @@ GREEN 结果：
 - `cargo clippy --all-targets --no-deps -- -D warnings`：通过
 - `git diff --check`：无 diff 错误
 
+## Review follow-up
+
+复核发现原实现只在目标书的 `reading_progress` 行比较 mutation，导致同一 ID 可以在
+另一本文本首次创建。修复新增全局 `reading_progress_mutations` lookup/primary-key
+机制，并在保存事务内登记 mutation；只读预检放在事务外，避免 SQLite 并发读锁升级为
+500。新增 `progress_mutation_id_cannot_be_reused_for_another_book`，验证 A 写入后 B
+复用同一 ID 返回 409、`current.book_id` 指向 A 且 B 没有进度行。
+
+修复后的验证结果：
+
+- `cargo test progress -- --nocapture`：11 passed, 0 failed
+- `cargo test migrate -- --nocapture`：2 passed, 0 failed
+- `cargo test -- --nocapture`：27 passed, 0 failed
+- 并发测试额外重复 5 次：`[0, 0, 0, 0, 0]`
+- `cargo fmt --all -- --check`、clippy `-D warnings`：通过
+
 ## 实际修改
 
 ### 数据库与模型
@@ -44,6 +60,11 @@ GREEN 结果：
 book、rating、char offset、percent、locator、version 和时间值；旧记录的新字段保持
 `NULL`。
 
+另外新增迁移安全的 `reading_progress_mutations` 全局 lookup 表，以 primary key 约束
+`mutation_id`，保存原始 book、载荷、version 和确认时间；迁移会从已有非空
+`reading_progress.last_mutation_id` 回填，使用 `ON CONFLICT DO NOTHING`，不修改或删除
+已有书籍/进度数据。
+
 `ReadingProgress` 现在返回整数 `version`、`mutation_id`、`position_kind`、
 `paragraph_fraction`。`SaveProgressRequest` 接受可选 `base_version`、`mutation_id`、
 `position_kind`、`paragraph_fraction`，并保留原有字段。
@@ -55,6 +76,8 @@ book、rating、char offset、percent、locator、version 和时间值；旧记�
   `progress_protocol_upgrade_required`。
 - 负版本、超过 128 字节的 mutation、未知位置类型、不合法或缺失的段落比例返回 400。
 - 当前支持的位置类型为 `paragraph_utf16_lf_v1`，其比例必须为有限的 `0..1`。
+- `mutation_id` 是全局写入 ID，不可复用于其他书、其他位置或其他载荷；跨书复用返回
+  `progress_conflict`，`current.book_id` 指向原占用记录。
 - 冲突返回 HTTP 409、code `progress_conflict`，并携带 `current`；没有当前记录时为
   `null`。缺书仍返回 404。`scan_in_progress` 的 HTTP 409 行为未改变。
 
@@ -66,6 +89,8 @@ book、rating、char offset、percent、locator、version 和时间值；旧记�
 - `RETURNING` 无行时读取当前记录：相同 mutation 且完整载荷一致返回原记录，不递增
   version 或 updated_at；相同 mutation 但载荷改变，或版本不同，返回结构化冲突。
 - 没有 `INSERT OR REPLACE`、删除重插或成功后的猜测式 SELECT。
+- 每次成功写入都会在同一事务内登记全局 mutation；竞争登记失败会回滚该书的进度写入，
+  返回结构化 409，因此同一 ID 的并发跨书写入不会留下第二条记录。
 - SQLite 临时数据库并发测试证明首次竞争不会产生 UNIQUE 500；一方成功，另一方得到
   409。显式回退保存允许，不按历史最大百分比拒绝。
 - 保存过程不使用 `expect`；写入期间记录消失会返回 404 或带 `current: null` 的冲突。
@@ -79,6 +104,7 @@ book、rating、char offset、percent、locator、version 和时间值；旧记�
 - `save_progress_rejects_invalid_protocol_values`
 - `progress_fields_are_mapped_by_all_book_endpoints`
 - `concurrent_first_progress_writes_are_insert_or_conflict`
+- `progress_mutation_id_cannot_be_reused_for_another_book`
 - `save_progress_missing_book_or_progress_returns_structured_error`
 - 原有 `scan_lock_rejects_overlapping_scan` 仍通过。
 
