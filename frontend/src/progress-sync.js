@@ -41,10 +41,10 @@ function samePosition(left, right) {
   if (!left || !right) return false;
   if ((Number(left.char_offset) || 0) !== (Number(right.char_offset) || 0)) return false;
   if ((Number(left.percent) || 0) !== (Number(right.percent) || 0)) return false;
-  if (left.position_kind && right.position_kind && left.position_kind !== right.position_kind) return false;
-  if (Number.isFinite(left.paragraph_fraction) && Number.isFinite(right.paragraph_fraction)
-    && left.paragraph_fraction !== right.paragraph_fraction) return false;
-  return true;
+  if ((left.position_kind || null) !== (right.position_kind || null)) return false;
+  const leftFraction = Number.isFinite(left.paragraph_fraction) ? left.paragraph_fraction : null;
+  const rightFraction = Number.isFinite(right.paragraph_fraction) ? right.paragraph_fraction : null;
+  return leftFraction === rightFraction;
 }
 
 function publicState(record) {

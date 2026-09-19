@@ -586,10 +586,9 @@ export default function App() {
   }, [animeVirtualizer]);
 
   function applyCachedProgress(books: any[]) {
-    const cache = progressCache();
     return books.map((book) => ({
       ...book,
-      progress: normalizeProgress(book.id, cache[book.id]) || normalizeProgress(book.id, book.progress),
+      progress: loadCachedProgress(book.id) || normalizeProgress(book.id, book.progress),
     }));
   }
 

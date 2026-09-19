@@ -199,6 +199,23 @@ test("same position does not create another write and exit send never confirms",
   expect(sync.getState(12).confirmed).toEqual(expect.objectContaining({ char_offset: 120 }));
 });
 
+test("a position-format change is a real new position", () => {
+  const { sync } = createTestSync();
+  sync.reconcile(16, baseProgress(16, {
+    position_kind: null,
+    paragraph_fraction: null,
+    char_offset: 160,
+    percent: 0.16,
+  }));
+
+  sync.observe(16, position(160, 0.16));
+
+  expect(sync.getState(16).pending).toEqual(expect.objectContaining({
+    char_offset: 160,
+    position_kind: "paragraph_utf16_lf_v1",
+  }));
+});
+
 test("storage failure keeps memory state and does not retry unsafe writes in one flush", async () => {
   let writes = 0;
   const storage = {
