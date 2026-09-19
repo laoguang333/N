@@ -143,6 +143,40 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
 
     sqlx::query(
         r#"
+        DELETE FROM reading_progress_mutations
+        WHERE mutation_id IN (
+            SELECT last_mutation_id
+            FROM reading_progress
+            WHERE last_mutation_id IS NOT NULL
+            GROUP BY last_mutation_id
+            HAVING COUNT(*) > 1
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE reading_progress
+        SET
+            last_mutation_id = NULL,
+            position_kind = NULL,
+            paragraph_fraction = NULL
+        WHERE last_mutation_id IS NOT NULL
+          AND rowid NOT IN (
+              SELECT MIN(rowid)
+              FROM reading_progress
+              WHERE last_mutation_id IS NOT NULL
+              GROUP BY last_mutation_id
+          );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
         INSERT INTO reading_progress_mutations (
             mutation_id, book_id, char_offset, percent, locator,
             position_kind, paragraph_fraction, version, updated_at
@@ -382,6 +416,111 @@ mod tests {
         assert_eq!(mutation.get::<i64, _>("book_id"), 7);
         assert_eq!(mutation.get::<i64, _>("char_offset"), 42);
         assert_eq!(mutation.get::<i64, _>("version"), 9);
+
+        db.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn migrate_deduplicates_legacy_mutations_by_lowest_rowid() {
+        let (dir, db_path) = temp_db_path("migrate-duplicate-mutations");
+        let db = connect_db(db_path.to_str().unwrap()).await.unwrap();
+        migrate(&db).await.unwrap();
+
+        for (id, title, rating) in [(10_i64, "Owner", 4_i64), (20_i64, "Duplicate", 5_i64)] {
+            sqlx::query(
+                r#"
+                INSERT INTO books (
+                    id, title, file_path, file_hash, format, size, mtime, encoding, rating
+                ) VALUES (?1, ?2, ?3, ?4, 'txt', 10, 1, 'UTF-8', ?5)
+                "#,
+            )
+            .bind(id)
+            .bind(title)
+            .bind(format!("{title}.txt"))
+            .bind(format!("hash-{id}"))
+            .bind(rating)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO reading_progress (
+                book_id, char_offset, percent, version, last_mutation_id,
+                position_kind, paragraph_fraction
+            ) VALUES
+                (10, 10, 0.1, 3, 'duplicate-mutation', 'paragraph_utf16_lf_v1', 0.2),
+                (20, 20, 0.2, 4, 'duplicate-mutation', 'paragraph_utf16_lf_v1', 0.8)
+            "#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        migrate(&db).await.unwrap();
+        migrate(&db).await.unwrap();
+
+        let rows = sqlx::query(
+            "SELECT book_id, char_offset, percent, version, last_mutation_id, position_kind, paragraph_fraction FROM reading_progress ORDER BY rowid",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let owner = rows
+            .iter()
+            .find(|row| row.get::<i64, _>("book_id") == 10)
+            .unwrap();
+        let duplicate = rows
+            .iter()
+            .find(|row| row.get::<i64, _>("book_id") == 20)
+            .unwrap();
+        assert_eq!(
+            owner
+                .get::<Option<String>, _>("last_mutation_id")
+                .as_deref(),
+            Some("duplicate-mutation")
+        );
+        assert_eq!(
+            owner.get::<Option<String>, _>("position_kind").as_deref(),
+            Some("paragraph_utf16_lf_v1")
+        );
+        assert_eq!(owner.get::<Option<f64>, _>("paragraph_fraction"), Some(0.2));
+        assert_eq!(duplicate.get::<i64, _>("char_offset"), 20);
+        assert_eq!(duplicate.get::<f64, _>("percent"), 0.2);
+        assert_eq!(duplicate.get::<i64, _>("version"), 4);
+        assert_eq!(duplicate.get::<Option<String>, _>("last_mutation_id"), None);
+        assert_eq!(duplicate.get::<Option<String>, _>("position_kind"), None);
+        assert_eq!(duplicate.get::<Option<f64>, _>("paragraph_fraction"), None);
+
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reading_progress WHERE last_mutation_id = 'duplicate-mutation'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 1);
+
+        let ledger = sqlx::query(
+            "SELECT book_id, char_offset, percent, version FROM reading_progress_mutations WHERE mutation_id = 'duplicate-mutation'",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].get::<i64, _>("book_id"), 10);
+        assert_eq!(ledger[0].get::<i64, _>("char_offset"), 10);
+        assert_eq!(ledger[0].get::<f64, _>("percent"), 0.1);
+        assert_eq!(ledger[0].get::<i64, _>("version"), 3);
+
+        let books = sqlx::query("SELECT title, rating FROM books ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(books[0].get::<String, _>("title"), "Owner");
+        assert_eq!(books[0].get::<Option<i64>, _>("rating"), Some(4));
+        assert_eq!(books[1].get::<String, _>("title"), "Duplicate");
+        assert_eq!(books[1].get::<Option<i64>, _>("rating"), Some(5));
 
         db.close().await;
         let _ = std::fs::remove_dir_all(dir);

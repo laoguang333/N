@@ -34,17 +34,36 @@ GREEN 结果：
 
 复核发现原实现只在目标书的 `reading_progress` 行比较 mutation，导致同一 ID 可以在
 另一本文本首次创建。修复新增全局 `reading_progress_mutations` lookup/primary-key
-机制，并在保存事务内登记 mutation；只读预检放在事务外，避免 SQLite 并发读锁升级为
-500。新增 `progress_mutation_id_cannot_be_reused_for_another_book`，验证 A 写入后 B
-复用同一 ID 返回 409、`current.book_id` 指向 A 且 B 没有进度行。
+机制，并在保存事务内先 reservation mutation，再写 `reading_progress`；因此竞争失败
+会回滚目标书写入，不会先留下 B 的进度行。新增
+`progress_mutation_id_cannot_be_reused_for_another_book`，验证 A 写入后 B 复用同一 ID
+返回 409、`current.book_id` 指向 A 且 B 没有进度行。
 
 修复后的验证结果：
 
-- `cargo test progress -- --nocapture`：11 passed, 0 failed
-- `cargo test migrate -- --nocapture`：2 passed, 0 failed
-- `cargo test -- --nocapture`：27 passed, 0 failed
-- 并发测试额外重复 5 次：`[0, 0, 0, 0, 0]`
-- `cargo fmt --all -- --check`、clippy `-D warnings`：通过
+- `cargo test progress`：14 passed, 0 failed
+- `cargo test migrate`：3 passed, 0 failed
+- `cargo test`：31 passed, 0 failed
+- `concurrent_same_mutation_across_books_leaves_one_progress_row` 重复 5 次：
+  `[0, 0, 0, 0, 0]`
+- `cargo fmt -- --check`、clippy `--all-targets --all-features -- -D warnings`：通过
+
+## Second review follow-up
+
+本轮进一步修复两个竞态/历史数据问题：
+
+- 已使用 mutation 的重试只有在 ledger 所属书籍的当前 `reading_progress` 仍存在、仍
+  持有同一 `mutation_id` 且载荷完全相同时才返回 200；否则返回 409，并返回 owner 的
+  当前进度，当前进度缺失时返回 `current: null`，不再返回历史 ledger 快照。
+- 迁移在回填 ledger 前，按 `reading_progress.rowid` 最小者确定重复 mutation 的唯一
+  owner；删除重复 ID 的旧 ledger 后只保留 owner 的 mutation/位置字段，并清空重复行的
+  `last_mutation_id`、`position_kind`、`paragraph_fraction`。其他进度、书籍内容和 rating
+  保持不变，重复迁移结果稳定。
+
+新增回归覆盖：`mutation_retry_uses_owner_current_progress_not_history`、
+`mutation_retry_returns_conflict_when_owner_progress_is_missing`、
+`concurrent_same_mutation_across_books_leaves_one_progress_row`，以及
+`migrate_deduplicates_legacy_mutations_by_lowest_rowid`。
 
 ## 实际修改
 
@@ -62,8 +81,8 @@ book、rating、char offset、percent、locator、version 和时间值；旧记�
 
 另外新增迁移安全的 `reading_progress_mutations` 全局 lookup 表，以 primary key 约束
 `mutation_id`，保存原始 book、载荷、version 和确认时间；迁移会从已有非空
-`reading_progress.last_mutation_id` 回填，使用 `ON CONFLICT DO NOTHING`，不修改或删除
-已有书籍/进度数据。
+`reading_progress.last_mutation_id` 回填。旧数据若存在重复 active ID，则以最低 rowid
+作为 owner，清理重复行的 active mutation/位置字段后再回填，且重复执行保持相同结果。
 
 `ReadingProgress` 现在返回整数 `version`、`mutation_id`、`position_kind`、
 `paragraph_fraction`。`SaveProgressRequest` 接受可选 `base_version`、`mutation_id`、
@@ -105,6 +124,10 @@ book、rating、char offset、percent、locator、version 和时间值；旧记�
 - `progress_fields_are_mapped_by_all_book_endpoints`
 - `concurrent_first_progress_writes_are_insert_or_conflict`
 - `progress_mutation_id_cannot_be_reused_for_another_book`
+- `mutation_retry_uses_owner_current_progress_not_history`
+- `mutation_retry_returns_conflict_when_owner_progress_is_missing`
+- `concurrent_same_mutation_across_books_leaves_one_progress_row`
+- `migrate_deduplicates_legacy_mutations_by_lowest_rowid`
 - `save_progress_missing_book_or_progress_returns_structured_error`
 - 原有 `scan_lock_rejects_overlapping_scan` 仍通过。
 
