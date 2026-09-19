@@ -1,5 +1,5 @@
 import { expect, test, vi } from "vitest";
-import { createProgressSync } from "./progress-sync";
+import { createProgressSync, progressCacheKey } from "./progress-sync";
 
 function makeStorage(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -167,7 +167,7 @@ test("legacy dirty cache is readable and migrated without clearing the old key",
 
   expect(sync.getState(10).pending).toEqual(expect.objectContaining({ char_offset: 1000, base_version: 4 }));
   expect(storage.getItem("txt-reader-progress")).toContain("1000");
-  expect(storage.getItem("txt-reader-progress-v2")).toContain("1000");
+  expect(storage.getItem(progressCacheKey(10))).toContain("1000");
 });
 
 test("a version conflict keeps local and remote choices until explicitly resolved", async () => {
@@ -294,4 +294,82 @@ test("choosing local after conflict retries from the latest remote version", asy
   await sync.flush(15);
 
   expect(save.mock.calls[1][1]).toEqual(expect.objectContaining({ base_version: 8, mutation_id: "M2", char_offset: 1500 }));
+});
+
+test("does not let an older GET response roll back a newer confirmed version", () => {
+  const { sync } = createTestSync();
+
+  sync.reconcile(18, baseProgress(18, { version: 8, char_offset: 800, percent: 0.8 }));
+  sync.reconcile(18, baseProgress(18, { version: 7, char_offset: 700, percent: 0.7 }));
+
+  expect(sync.getState(18).confirmed).toEqual(expect.objectContaining({ version: 8, char_offset: 800, percent: 0.8 }));
+});
+
+test("ignores an old save acknowledgement after a newer remote conflict wins", async () => {
+  let releaseOldAck;
+  const oldAck = new Promise((resolve) => { releaseOldAck = resolve; });
+  const save = vi.fn(() => oldAck);
+  const { sync } = createTestSync({ save });
+
+  sync.reconcile(19, baseProgress(19, { version: 7, char_offset: 700, percent: 0.7 }));
+  sync.observe(19, position(800, 0.8));
+  const flush = sync.flush(19);
+  await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+
+  sync.reconcile(19, baseProgress(19, {
+    version: 9,
+    char_offset: 900,
+    percent: 0.9,
+    mutation_id: "other",
+  }));
+  sync.resolveConflict(19, "remote");
+
+  releaseOldAck(baseProgress(19, {
+    version: 8,
+    char_offset: 800,
+    percent: 0.8,
+    mutation_id: "M1",
+  }));
+  await flush;
+
+  expect(sync.getState(19)).toMatchObject({
+    confirmed: expect.objectContaining({ version: 9, char_offset: 900 }),
+    submitted: null,
+    pending: null,
+    conflict: null,
+  });
+});
+
+test("persists each book in an isolated cache record", () => {
+  const storage = makeStorage();
+  const first = createTestSync({ storage });
+  const second = createTestSync({ storage });
+
+  first.sync.reconcile(101, baseProgress(101, { version: 1 }));
+  first.sync.observe(101, position(800, 0.8));
+  second.sync.reconcile(202, baseProgress(202, { version: 1 }));
+  second.sync.observe(202, position(900, 0.9));
+
+  expect(storage.getItem("txt-reader-progress-v2:101")).toContain('"char_offset":800');
+  expect(storage.getItem("txt-reader-progress-v2:202")).toContain('"char_offset":900');
+  expect(JSON.parse(storage.getItem("txt-reader-progress-v2:101")).pending.char_offset).toBe(800);
+  expect(JSON.parse(storage.getItem("txt-reader-progress-v2:202")).pending.char_offset).toBe(900);
+});
+
+test("an EPUB locator change is a real new position even at the same percentage", () => {
+  const { sync } = createTestSync();
+  sync.reconcile(203, baseProgress(203, {
+    char_offset: 0,
+    percent: 0.5,
+    locator: "epubcfi(/6/2)",
+    position_kind: null,
+    paragraph_fraction: null,
+  }));
+
+  sync.observe(203, epubPosition("epubcfi(/6/4)", 0.5));
+
+  expect(sync.getState(203).pending).toEqual(expect.objectContaining({
+    percent: 0.5,
+    locator: "epubcfi(/6/4)",
+  }));
 });

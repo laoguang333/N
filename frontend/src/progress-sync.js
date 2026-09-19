@@ -4,6 +4,10 @@ const LEGACY_CACHE_KEY = PROGRESS_CACHE_KEY;
 const CONFLICT_MESSAGE = "存在未同步的本地位置，与服务端进度不同";
 const STORAGE_MESSAGE = "本地进度备份失败，当前阅读仍会继续";
 
+export function progressCacheKey(bookId) {
+  return `${PROGRESS_CACHE_V2_KEY}:${String(bookId)}`;
+}
+
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -42,6 +46,7 @@ function samePosition(left, right) {
   if (!left || !right) return false;
   if ((Number(left.char_offset) || 0) !== (Number(right.char_offset) || 0)) return false;
   if ((Number(left.percent) || 0) !== (Number(right.percent) || 0)) return false;
+  if ((left.locator || null) !== (right.locator || null)) return false;
   if ((left.position_kind || null) !== (right.position_kind || null)) return false;
   const leftFraction = Number.isFinite(left.paragraph_fraction) ? left.paragraph_fraction : null;
   const rightFraction = Number.isFinite(right.paragraph_fraction) ? right.paragraph_fraction : null;
@@ -78,7 +83,7 @@ export function createProgressSync({
 }) {
   const records = new Map();
   const flights = new Map();
-  let loaded = false;
+  const loadedBooks = new Set();
   let storageReadError = null;
 
   function emit(bookId, record) {
@@ -133,46 +138,48 @@ export function createProgressSync({
     return record;
   }
 
-  function ensureLoaded() {
-    if (loaded) return;
-    loaded = true;
-    let v2 = {};
-    let legacy = {};
+  function ensureLoaded(bookId) {
+    const key = String(bookId);
+    if (loadedBooks.has(key)) return;
+    loadedBooks.add(key);
+
+    let isolated = null;
     try {
-      v2 = parseObject(storage.getItem(PROGRESS_CACHE_V2_KEY));
+      isolated = storage.getItem(progressCacheKey(bookId));
     } catch {
       storageReadError = STORAGE_MESSAGE;
     }
-    try {
-      legacy = parseObject(storage.getItem(LEGACY_CACHE_KEY));
-    } catch {
-      storageReadError = STORAGE_MESSAGE;
-    }
-    for (const [bookId, raw] of Object.entries(v2)) {
-      records.set(String(bookId), hydrateRecord(Number(bookId), raw));
-    }
-    for (const [bookId, raw] of Object.entries(legacy)) {
-      if (!records.has(String(bookId))) {
-        const record = readLegacyRecord(Number(bookId), legacy);
-        if (record) records.set(String(bookId), record);
-      }
-    }
-    if (Object.keys(legacy).length > 0) {
-      const cache = {};
-      for (const [key, value] of records.entries()) cache[key] = serializeRecord(value);
+
+    let record = isolated ? hydrateRecord(Number(bookId), parseObject(isolated)) : null;
+    if (!record) {
+      let v2 = {};
+      let legacy = {};
       try {
-        storage.setItem(PROGRESS_CACHE_V2_KEY, JSON.stringify(cache));
+        v2 = parseObject(storage.getItem(PROGRESS_CACHE_V2_KEY));
       } catch {
-        for (const record of records.values()) {
+        storageReadError = STORAGE_MESSAGE;
+      }
+      try {
+        legacy = parseObject(storage.getItem(LEGACY_CACHE_KEY));
+      } catch {
+        storageReadError = STORAGE_MESSAGE;
+      }
+      if (v2[key]) record = hydrateRecord(Number(bookId), v2[key]);
+      if (!record) record = readLegacyRecord(Number(bookId), legacy);
+      if (record) {
+        try {
+          storage.setItem(progressCacheKey(bookId), JSON.stringify(serializeRecord(record)));
+        } catch {
           record.storage_error = STORAGE_MESSAGE;
           record.error = STORAGE_MESSAGE;
         }
       }
     }
+    records.set(key, record || newRecord());
   }
 
   function getRecord(bookId) {
-    ensureLoaded();
+    ensureLoaded(bookId);
     const key = String(bookId);
     if (!records.has(key)) records.set(key, newRecord());
     return records.get(key);
@@ -188,10 +195,8 @@ export function createProgressSync({
   }
 
   function persist(bookId, record) {
-    const cache = {};
-    for (const [key, value] of records.entries()) cache[key] = serializeRecord(value);
     try {
-      storage.setItem(PROGRESS_CACHE_V2_KEY, JSON.stringify(cache));
+      storage.setItem(progressCacheKey(bookId), JSON.stringify(serializeRecord(record)));
       record.storage_error = null;
       return true;
     } catch {
@@ -277,6 +282,9 @@ export function createProgressSync({
         try {
           const response = await save(Number(bookId), payload);
           const saved = normalizeProgress(bookId, response, { dirty: false });
+          if (!record.submitted || record.submitted.mutation_id !== payload.mutation_id) {
+            continue;
+          }
           if (!saved || (saved.book_id != null && Number(saved.book_id) !== Number(bookId))) {
             record.error = "进度响应与当前书籍不匹配";
             persistAndEmit(bookId, record);
@@ -307,35 +315,46 @@ export function createProgressSync({
   function reconcile(bookId, remoteProgress) {
     const record = getRecord(bookId);
     const remote = remoteProgress ? normalizeProgress(bookId, remoteProgress, { dirty: false }) : null;
-    if (remote) record.knownBaseVersion = isVersion(remote.version) ? remote.version : record.knownBaseVersion;
-    else record.knownBaseVersion = 0;
+    const confirmedVersion = record.confirmed?.version;
+    const remoteIsOlder = Boolean(
+      record.confirmed
+      && (
+        (!remote && isVersion(confirmedVersion))
+        || (remote && isVersion(confirmedVersion) && isVersion(remote.version) && remote.version < confirmedVersion)
+      ),
+    );
+    const effectiveRemote = remoteIsOlder ? record.confirmed : remote;
+    if (!remoteIsOlder) {
+      if (remote) record.knownBaseVersion = isVersion(remote.version) ? remote.version : record.knownBaseVersion;
+      else record.knownBaseVersion = 0;
+    }
 
-    if (record.submitted && remote?.mutation_id === record.submitted.mutation_id) {
-      record.confirmed = remote;
+    if (record.submitted && effectiveRemote?.mutation_id === record.submitted.mutation_id) {
+      record.confirmed = effectiveRemote;
       record.submitted = null;
-      updatePendingBase(record, remote.version);
+      updatePendingBase(record, effectiveRemote.version);
       record.conflict = null;
       record.error = null;
       persistAndEmit(bookId, record);
       return getState(bookId);
     }
 
-    record.confirmed = remote;
+    record.confirmed = effectiveRemote;
     if (record.pending) {
-      if (!remote && !isVersion(record.pending.base_version)) {
+      if (!effectiveRemote && !isVersion(record.pending.base_version)) {
         record.pending.base_version = 0;
-      } else if (remote && !isVersion(record.pending.base_version)) {
-        setConflict(bookId, record, remote);
+      } else if (effectiveRemote && !isVersion(record.pending.base_version)) {
+        setConflict(bookId, record, effectiveRemote);
         return getState(bookId);
-      } else if (remote && record.pending.base_version !== remote.version) {
-        setConflict(bookId, record, remote);
+      } else if (effectiveRemote && record.pending.base_version !== effectiveRemote.version) {
+        setConflict(bookId, record, effectiveRemote);
         return getState(bookId);
-      } else if (remote && samePosition(record.pending, remote)) {
+      } else if (effectiveRemote && samePosition(record.pending, effectiveRemote)) {
         record.pending = null;
       }
     }
-    if (record.submitted && remote && record.submitted.base_version !== remote.version) {
-      setConflict(bookId, record, remote);
+    if (record.submitted && effectiveRemote && record.submitted.base_version !== effectiveRemote.version) {
+      setConflict(bookId, record, effectiveRemote);
       return getState(bookId);
     }
     record.error = null;

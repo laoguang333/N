@@ -226,6 +226,7 @@ export default function App() {
   const animeSaveTimer = useRef<number | null>(null);
   const autoScrollProgressUpdatedAt = useRef(0);
   const restoreSavingBlocked = useRef(false);
+  const restoreSessionRef = useRef<any>(null);
   const navigationId = useRef(0);
   const openRequestId = useRef(0);
   const lastSaveSucceeded = useRef(true);
@@ -269,6 +270,7 @@ export default function App() {
   const invalidateReaderSession = useCallback(() => {
     readerScope.invalidate();
     readerTicketRef.current = null;
+    restoreSessionRef.current = null;
     openRequestId.current += 1;
     navigationId.current += 1;
     clearReaderAsyncWork();
@@ -364,11 +366,15 @@ export default function App() {
         : null;
       setReader((current) => {
         if (current.book?.book_id !== bookId) return current;
+        const restoreSession = restoreSessionRef.current;
+        const preserveUserPosition = restoreSession?.bookId === bookId && restoreSession.userInteracted;
         return {
           ...current,
           progressSync: state,
           progress: progress || current.progress,
-          visiblePercent: state.pending || state.submitted ? current.visiblePercent : (progress?.percent ?? current.visiblePercent),
+          visiblePercent: state.pending || state.submitted || preserveUserPosition
+            ? current.visiblePercent
+            : (progress?.percent ?? current.visiblePercent),
           toast: state.error || current.toast,
         };
       });
@@ -461,12 +467,18 @@ export default function App() {
     }
   }
 
-  function loadCachedProgress(bookId: number) {
+  function loadCachedProgress(bookId: number, serverProgress?: any) {
     const state = progressSync.getState(bookId);
-    const local = state.pending || state.submitted || state.confirmed;
-    return normalizeProgress(bookId, local, {
-      dirty: Boolean(state.pending || state.submitted),
-    }) || normalizeProgress(bookId, progressCache()[bookId]) || null;
+    const dirtyLocal = state.pending || state.submitted;
+    if (dirtyLocal) {
+      return normalizeProgress(bookId, dirtyLocal, { dirty: true });
+    }
+    if (arguments.length > 1) {
+      return normalizeProgress(bookId, serverProgress) || null;
+    }
+    return normalizeProgress(bookId, state.confirmed, { dirty: false })
+      || normalizeProgress(bookId, progressCache()[bookId])
+      || null;
   }
 
   function updateShelfBookProgress(progress: any) {
@@ -637,7 +649,9 @@ export default function App() {
   function applyCachedProgress(books: any[]) {
     return books.map((book) => ({
       ...book,
-      progress: loadCachedProgress(book.id) || normalizeProgress(book.id, book.progress),
+      progress: Object.prototype.hasOwnProperty.call(book, "progress")
+        ? loadCachedProgress(book.id, book.progress)
+        : loadCachedProgress(book.id),
     }));
   }
 
@@ -810,10 +824,67 @@ export default function App() {
     );
   }
 
+  function restoreProgressKey(progress: any) {
+    if (!progress) return "";
+    return [
+      progress.version ?? "",
+      progress.char_offset ?? 0,
+      progress.percent ?? 0,
+      progress.locator || "",
+      progress.position_kind || "",
+      progress.paragraph_fraction ?? "",
+    ].join(":");
+  }
+
+  function restoreOffset(progress: any) {
+    if (!progress) return 0;
+    if (progress.position_kind === "paragraph_utf16_lf_v1" && Number.isFinite(progress.char_offset)) {
+      return Math.max(0, progress.char_offset);
+    }
+    if (Number.isFinite(progress.percent)) return offsetForPercent(progress.percent);
+    return Math.max(0, Number(progress.char_offset) || 0);
+  }
+
+  async function restoreLatestProgress(ticket: any, bookId: number) {
+    const restoreSession = restoreSessionRef.current;
+    if (!restoreSession || restoreSession.ticket !== ticket || restoreSession.bookId !== bookId) return false;
+    if (restoreSession.userInteracted || readerRef.current.paragraphs.length === 0) return false;
+    const progress = loadCachedProgress(bookId);
+    if (!progress) return false;
+    const key = restoreProgressKey(progress);
+    if (restoreSession.appliedKey === key || restoreSession.inFlightKey === key) return true;
+    updateReader({
+      progress,
+      visiblePercent: progress.percent,
+      progressSync: progressSync.getState(bookId),
+    });
+    restoreSession.inFlightKey = key;
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const restored = await navigateToOffset(
+          restoreOffset(progress),
+          progress.percent === 1,
+          { ticket, bookId },
+          progress,
+        );
+        if (restored) {
+          restoreSession.appliedKey = key;
+          return true;
+        }
+        if (restoreSession.userInteracted || !isCurrentReaderSession(ticket, bookId)) return false;
+        await afterNextPaint();
+      }
+      return false;
+    } finally {
+      if (restoreSession.inFlightKey === key) restoreSession.inFlightKey = null;
+    }
+  }
+
   const openBook = useCallback(async (bookId: number) => {
     clearReaderAsyncWork();
     const ticket = readerScope.begin();
     readerTicketRef.current = ticket;
+    restoreSessionRef.current = { ticket, bookId, userInteracted: false, appliedKey: null };
     saveFailureCount.current = 0;
     lastSaveSucceeded.current = true;
     schedulePeriodicSave(SAVE_BASE_INTERVAL);
@@ -854,7 +925,15 @@ export default function App() {
           const local = state.pending || state.submitted || state.confirmed;
           const nextProgress = normalizeProgress(bookId, local, { dirty: Boolean(state.pending || state.submitted) });
           if (current.book?.book_id !== bookId || current.progressSeeking || !nextProgress) return;
-          updateReader({ progressSync: state, progress: nextProgress, visiblePercent: nextProgress.percent });
+          const restoreSession = restoreSessionRef.current;
+          updateReader({
+            progressSync: state,
+            progress: nextProgress,
+            ...(restoreSession?.ticket === ticket && !restoreSession.userInteracted
+              ? { visiblePercent: nextProgress.percent }
+              : {}),
+          });
+          void restoreLatestProgress(ticket, bookId);
         })
         .catch((error) => {
           if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
@@ -899,13 +978,10 @@ export default function App() {
       });
       await afterNextPaint();
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
-      const offset = restoredProgress?.char_offset || offsetForPercent(restoredProgress?.percent || 0);
-      const restored = await navigateToOffset(
-        offset,
-        restoredProgress?.percent === 1,
-        { ticket, bookId },
-        restoredProgress,
-      );
+      const latestProgress = loadCachedProgress(bookId);
+      const restored = latestProgress
+        ? await restoreLatestProgress(ticket, bookId)
+        : await navigateToOffset(0, false, { ticket, bookId });
       if (!restored || requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
     } catch (error) {
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
@@ -1096,29 +1172,7 @@ export default function App() {
   }, [queueSearchResultReveal, reader.activeSearchId, reader.searchOpen, reader.searchQuery, reader.searchResults.length]);
 
   function onReaderScroll() {
-    if (!canSaveReaderProgress()) {
-      if (restoreSavingBlocked.current && restoreCaptureTimer.current === null) {
-        const ticket = readerTicketRef.current;
-        const bookId = readerRef.current.book?.book_id;
-        const retryCapture = (attempt: number) => {
-          restoreCaptureTimer.current = window.setTimeout(() => {
-            restoreCaptureTimer.current = null;
-            if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
-            if (!canSaveReaderProgress()) {
-              if (attempt < 10) retryCapture(attempt + 1);
-              return;
-            }
-            const root = readerRoot.current;
-            const current = readerRef.current;
-            if (!root || (!current.progress && root.scrollTop <= 1)) return;
-            snapshotProgress({ source: "scroll_after_restore" });
-            scheduleProgressSave(450, { source: "scroll_after_restore" });
-          }, 120);
-        };
-        retryCapture(0);
-      }
-      return;
-    }
+    if (restoreSavingBlocked.current || !canSaveReaderProgress()) return;
     if (readerRef.current.progressSeeking) return;
     if (readerRef.current.autoScrollPlaying) {
       const now = performance.now();
@@ -1161,6 +1215,7 @@ export default function App() {
     clearReaderAsyncWork();
     saveProgressInBackground("go_shelf");
     window.location.hash = "#/";
+    void loadBooks();
   }
 
   function openReader(bookId: number) {
@@ -1519,6 +1574,10 @@ export default function App() {
   }
 
   function onManualReaderScroll() {
+    const restoreSession = restoreSessionRef.current;
+    if (restoreSession && restoreSession.bookId === readerRef.current.book?.book_id) {
+      restoreSession.userInteracted = true;
+    }
     // Once the user starts moving, their position takes precedence over a
     // pending restoration or search/setting adjustment.
     if (restoreSavingBlocked.current) {

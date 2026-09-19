@@ -22,13 +22,14 @@ function json(route, body) {
   });
 }
 
-function progressFor(charOffset, percent = 0) {
+function progressFor(charOffset, percent = 0, extra = {}) {
   return {
     book_id: 1,
     char_offset: charOffset,
     percent,
     version: 1,
     updated_at: "2026-04-30T00:00:01.000Z",
+    ...extra,
   };
 }
 
@@ -163,8 +164,11 @@ test.describe("reader regressions", () => {
     const targetOffset = paragraphOffsets(lines)[42];
     const fixture = await setupReader(page, {
       lines,
-      // Deliberately make percent point elsewhere; opening must use char_offset.
-      initialProgress: progressFor(targetOffset + 12, 0.01),
+      // The new paragraph anchor is authoritative even when the legacy percent disagrees.
+      initialProgress: progressFor(targetOffset + 12, 0.01, {
+        position_kind: "paragraph_utf16_lf_v1",
+        paragraph_fraction: 0,
+      }),
     });
     const target = page.locator(`p[data-offset="${fixture.offsets[42]}"]`);
     await expect(target).toBeVisible();
@@ -175,6 +179,30 @@ test.describe("reader regressions", () => {
     await fontSize.fill("30");
     await expect(target).toBeInViewport();
     await expect(target).toContainText("RESTORE_TARGET");
+  });
+
+  test("uses the old percentage compatibility path for untyped progress", async ({ page }) => {
+    const lines = [
+      "开头短段落",
+      ...Array.from({ length: 40 }, (_, index) => `前置内容 ${index} ${"扩展文本。".repeat((index % 6) + 1)}`),
+      "OLD_FORMAT_TARGET",
+      ...Array.from({ length: 40 }, (_, index) => `后续内容 ${index} ${"扩展文本。".repeat((index % 6) + 1)}`),
+    ];
+    const targetIndex = 41;
+    const targetPercent = paragraphOffsets(lines)[targetIndex] / lines.join("\n\n").length;
+    await page.addInitScript((progress) => {
+      localStorage.setItem("txt-reader-progress-v2:1", JSON.stringify({
+        confirmed: { book_id: 1, char_offset: 99, percent: progress.percent, version: 1 },
+        submitted: null,
+        pending: null,
+        conflict: null,
+      }));
+    }, { percent: targetPercent });
+    const fixture = await setupReader(page, { lines });
+    const target = page.locator(`p[data-offset="${fixture.offsets[targetIndex]}"]`);
+    await expect(target).toBeInViewport();
+    await page.waitForTimeout(700);
+    expect(fixture.progressWrites).toHaveLength(0);
   });
 
   test("saves the paragraph reached by scrolling and restores it after reload", async ({ page }) => {

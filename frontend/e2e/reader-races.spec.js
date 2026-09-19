@@ -141,19 +141,15 @@ test.describe("reader request races", () => {
     await page.goto("/");
     await page.locator(".book-row", { hasText: "Book A" }).click();
     await expect(page.locator(".reader-content")).toContainText("A content");
-    await page.locator(".reader-content").evaluate((element) => {
-      element.scrollTop = element.scrollHeight;
-      element.dispatchEvent(new Event("scroll"));
-    });
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 5000);
     await page.evaluate(() => { window.location.hash = "#/reader/2"; });
     await expect.poll(() => aSaveStarted).toBe(true);
     await expect(page.locator(".reader-content")).toContainText("B content");
     slowASave.resolve();
     await expect.poll(() => aSaveFinished).toBe(true);
-    await page.locator(".reader-content").evaluate((element) => {
-      element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) * 0.35);
-      element.dispatchEvent(new Event("scroll"));
-    });
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 1200);
     await expect.poll(() => bWrites.length).toBeGreaterThan(0);
     await expect(page.locator(".reader-title")).toContainText("Book B");
     await expect(page.locator(".reader-content")).not.toContainText("999");
