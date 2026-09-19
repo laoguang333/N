@@ -149,7 +149,7 @@ test.describe("shelf and folder request races", () => {
     const slowRating = deferred();
     let ratingStarted = false;
     const aBook = book(1, "A result");
-    const bBook = book(2, "B result");
+    const bBook = book(1, "B result");
 
     await page.route("**/api/**", async (route) => {
       const request = route.request();
@@ -174,6 +174,7 @@ test.describe("shelf and folder request races", () => {
     await expect.poll(() => ratingStarted).toBe(true);
     await page.getByRole("searchbox", { name: "搜索小说" }).fill("B");
     await expect(page.locator(".book-row", { hasText: "B result" })).toBeVisible();
+    await expect(page.locator(".book-row", { hasText: "B result" }).locator(".star-button").first()).toBeEnabled();
     slowRating.resolve();
     await expect(page.getByText("A rating failed")).toHaveCount(0);
   });
@@ -225,7 +226,7 @@ test.describe("shelf and folder request races", () => {
     const slowRating = deferred();
     let ratingStarted = false;
     const xBook = book(10, "X result");
-    const yBook = book(11, "Y result");
+    const yBook = book(10, "Y result");
 
     await page.route("**/api/**", async (route) => {
       const request = route.request();
@@ -257,6 +258,7 @@ test.describe("shelf and folder request races", () => {
     await page.getByRole("button", { name: "关闭文件夹" }).click();
     await page.locator(".folder-row", { hasText: "Y" }).click();
     await expect(page.locator(".folder-book-title", { hasText: "Y result" })).toBeVisible();
+    await expect(page.locator(".folder-star-button").first()).toBeEnabled();
     slowRating.resolve();
     await expect(page.getByText("X rating failed")).toHaveCount(0);
   });

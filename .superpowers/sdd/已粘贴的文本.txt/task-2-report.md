@@ -97,3 +97,21 @@
 - 已恢复 tracked 的 `frontend/test-results/.last-run.json`，并清理本轮生成的 test-results artifacts；没有把生成物提交。
 
 本轮仍未处理或弱化 `reader-regressions.spec.js` 的已知位置恢复失败；它属于 T5。T3/T4/T5/T7、Rust 文件和 T4 queue 均未修改。
+
+## T2 reviewer fix round（2026-09-19，generation/query fences）
+
+- 每次 `openBook` 创建 reader generation 时重置 `saveFailureCount` 和 `lastSaveSucceeded`，因此 B 不继承 A 的 periodic backoff/failure state。
+- shelf 与 FolderOverlay 都记录当前 rating operation。query/tag/close invalidation 只清除属于被失效 operation 的 `ratingBookId`；旧 success/error/finally 不能留下禁用状态，也不能清除新 operation 的 loading marker。
+- `loadBooks` 在读取 shelf state 的 Promise await 之后、发出 `getShelf` 之前再次检查 `shelfScope.isCurrent(ticket)`，满足每个 await 后的 fence 要求。
+- shelf/folder race E2E 改为复用同一 book id 的新 query/folder 结果，并断言新视图中的 rating button 已重新 enabled；修改前两项断言均 RED，加入 operation invalidation 后 GREEN。
+
+### Verification
+
+- `npm run test --prefix frontend`：27/27 Vitest tests 通过。
+- `npm run build --prefix frontend`：通过；仅有既有 chunk-size warning。
+- `cargo clippy`：通过；未修改 Rust。
+- `PW_CHANNEL=chrome npx playwright test --config frontend/playwright.config.js frontend/e2e/reader-races.spec.js frontend/e2e/shelf-races.spec.js frontend/e2e/shelf.spec.js --workers=1`：11/11 通过。
+- 曾尝试增加独立 generation-backoff E2E；该测试在 reader restoration 尚未解除 `restoreSavingBlocked` 时等待 periodic write，无法形成有效的 backoff 断言，已删除而未弱化现有 periodic-loop race。实现重置仍由 build、全量 race suite 和 `openBook` 路径覆盖。
+- 已恢复 tracked 的 `frontend/test-results/.last-run.json`，并清理本轮 artifacts；生成物未提交。
+
+本轮未触碰 Rust、T3/T4/T5/T7；已知 T5 reader position regression 仍按前述报告保留。

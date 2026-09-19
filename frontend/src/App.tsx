@@ -240,6 +240,17 @@ export default function App() {
   const shelfRatingScope = useMemo(() => createRequestScope(), []);
   const readerScope = useMemo(() => createRequestScope(), []);
   const readerTicketRef = useRef<any>(null);
+  const shelfRatingOperationRef = useRef<any>(null);
+
+  const invalidateShelfRating = useCallback(() => {
+    const operation = shelfRatingOperationRef.current;
+    shelfRatingScope.invalidate();
+    shelfRatingOperationRef.current = null;
+    if (!operation) return;
+    updateShelf((current) => current.ratingBookId === operation.bookId
+      ? { ...current, ratingBookId: null }
+      : current);
+  }, [shelfRatingScope]);
 
   const clearReaderAsyncWork = useCallback(() => {
     [saveTimer, scrollTimer, progressFrame, seekFrame, autoScrollSaveTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
@@ -630,6 +641,7 @@ export default function App() {
         resolve(value);
         return value;
       }));
+      if (!shelfScope.isCurrent(ticket)) return;
       const data = await getShelf({
         search: current.search,
         status: current.status,
@@ -731,6 +743,8 @@ export default function App() {
     clearReaderAsyncWork();
     const ticket = readerScope.begin();
     readerTicketRef.current = ticket;
+    saveFailureCount.current = 0;
+    lastSaveSucceeded.current = true;
     schedulePeriodicSave(SAVE_BASE_INTERVAL);
     const requestId = ++openRequestId.current;
     navigationId.current += 1;
@@ -890,7 +904,7 @@ export default function App() {
   useEffect(() => {
     if (shelfTimer.current) window.clearTimeout(shelfTimer.current);
     shelfScope.invalidate();
-    shelfRatingScope.invalidate();
+    invalidateShelfRating();
     shelfTimer.current = window.setTimeout(() => void loadBooks(), 180);
     return () => {
       if (shelfTimer.current) {
@@ -898,7 +912,7 @@ export default function App() {
         shelfTimer.current = null;
       }
     };
-  }, [loadBooks, shelf.search, shelf.status, shelf.minRating, shelf.sort, shelfRatingScope, shelfScope]);
+  }, [invalidateShelfRating, loadBooks, shelf.search, shelf.status, shelf.minRating, shelf.sort, shelfScope]);
 
   useEffect(() => {
     if (route.name !== "tab-a") return;
@@ -1287,20 +1301,29 @@ export default function App() {
     const nextRating = book.rating === rating ? null : rating;
     const ticket = shelfRatingScope.begin();
     const queryKey = JSON.stringify([shelf.search, shelf.status, shelf.minRating, shelf.sort]);
+    shelfRatingOperationRef.current = { bookId: book.id, queryKey, ticket };
     updateShelf({ ratingBookId: book.id, error: "" });
     try {
       const updated = await saveRating(book.id, nextRating);
-      if (!shelfRatingScope.isCurrent(ticket) || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) return;
+      if (shelfRatingOperationRef.current?.ticket !== ticket
+        || !shelfRatingScope.isCurrent(ticket)
+        || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) return;
       updateShelf((current) => ({
         ...current,
         items: current.items.map((item) => item.type === "book" && item.id === book.id ? { type: "book", ...updated } : item),
         ratingBookId: null,
-      }));
+    }));
     } catch (error) {
-      if (!shelfRatingScope.isCurrent(ticket) || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort]) || isAbortError(error)) return;
+      if (shelfRatingOperationRef.current?.ticket !== ticket
+        || !shelfRatingScope.isCurrent(ticket)
+        || queryKey !== JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])
+        || isAbortError(error)) return;
       updateShelf({ error: (error as Error).message, ratingBookId: null });
     } finally {
-      if (shelfRatingScope.isCurrent(ticket) && queryKey === JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) {
+      if (shelfRatingOperationRef.current?.ticket === ticket
+        && shelfRatingScope.isCurrent(ticket)
+        && queryKey === JSON.stringify([shelfRef.current.search, shelfRef.current.status, shelfRef.current.minRating, shelfRef.current.sort])) {
+        shelfRatingOperationRef.current = null;
         updateShelf((current) => current.ratingBookId === book.id ? { ...current, ratingBookId: null } : current);
       }
     }

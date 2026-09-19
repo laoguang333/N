@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, Star, X } from "lucide-react";
 import { listBooks, saveRating } from "./api";
 import { formatPercent } from "./reader";
@@ -35,6 +35,16 @@ export default function FolderOverlay({
   const tagRef = useRef(tag);
   const queryKey = JSON.stringify([tag, search, status, minRating, sort]);
   const queryKeyRef = useRef(queryKey);
+  const ratingOperationRef = useRef<any>(null);
+
+  const invalidateRating = useCallback(() => {
+    const operation = ratingOperationRef.current;
+    folderRatingScope.invalidate();
+    ratingOperationRef.current = null;
+    if (operation) {
+      setRatingBookId((current) => current === operation.bookId ? null : current);
+    }
+  }, [folderRatingScope]);
 
   const effectiveSearch = useMemo(() => {
     const query = String(search || "").trim().toLowerCase();
@@ -53,7 +63,7 @@ export default function FolderOverlay({
   useEffect(() => {
     if (!tag) {
       folderScope.invalidate();
-      folderRatingScope.invalidate();
+      invalidateRating();
       return;
     }
     const ticket = folderScope.begin();
@@ -81,9 +91,9 @@ export default function FolderOverlay({
       });
     return () => {
       folderScope.invalidate();
-      folderRatingScope.invalidate();
+      invalidateRating();
     };
-  }, [effectiveSearch, folderRatingScope, folderScope, minRating, sort, status, tag]);
+  }, [effectiveSearch, folderScope, invalidateRating, minRating, sort, status, tag]);
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
@@ -106,17 +116,29 @@ export default function FolderOverlay({
     const ticket = folderRatingScope.begin();
     const requestedTag = tag;
     const requestedQueryKey = queryKey;
+    ratingOperationRef.current = { bookId: book.id, requestedQueryKey, requestedTag, ticket };
     setRatingBookId(book.id);
     setError("");
     try {
       const updated = await saveRating(book.id, nextRating);
-      if (!folderRatingScope.isCurrent(ticket) || requestedTag !== tagRef.current || requestedQueryKey !== queryKeyRef.current) return;
+      if (ratingOperationRef.current?.ticket !== ticket
+        || !folderRatingScope.isCurrent(ticket)
+        || requestedTag !== tagRef.current
+        || requestedQueryKey !== queryKeyRef.current) return;
       setBooks((items) => items.map((item) => (item.id === book.id ? updated : item)));
     } catch (err) {
-      if (!folderRatingScope.isCurrent(ticket) || requestedTag !== tagRef.current || requestedQueryKey !== queryKeyRef.current || (err as Error)?.name === "AbortError") return;
+      if (ratingOperationRef.current?.ticket !== ticket
+        || !folderRatingScope.isCurrent(ticket)
+        || requestedTag !== tagRef.current
+        || requestedQueryKey !== queryKeyRef.current
+        || (err as Error)?.name === "AbortError") return;
       setError((err as Error).message);
     } finally {
-      if (folderRatingScope.isCurrent(ticket) && requestedTag === tagRef.current && requestedQueryKey === queryKeyRef.current) {
+      if (ratingOperationRef.current?.ticket === ticket
+        && folderRatingScope.isCurrent(ticket)
+        && requestedTag === tagRef.current
+        && requestedQueryKey === queryKeyRef.current) {
+        ratingOperationRef.current = null;
         setRatingBookId((current) => current === book.id ? null : current);
       }
     }
