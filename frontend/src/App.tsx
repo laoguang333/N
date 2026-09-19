@@ -54,9 +54,8 @@ import {
 import {
   PROGRESS_CACHE_KEY,
   normalizeProgress,
-  savePayload,
-  chooseProgress,
 } from "./progress";
+import { createProgressSync } from "./progress-sync";
 import { buildChapters, buildParagraphOffsetMap, buildParagraphs, findChapterIndex, findParagraphIndex, formatPercent, formatSize, parseSettings } from "./reader";
 import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 import AutoScroll from "./AutoScroll";
@@ -168,6 +167,7 @@ export default function App() {
     controlsVisible: false,
     progressSeeking: false,
     pendingSeekPercent: null as number | null,
+    progressSync: null as any,
     settingsOpen: false,
     autoScrollPlaying: false,
   });
@@ -220,9 +220,9 @@ export default function App() {
   const seekFrame = useRef<number | null>(null);
   const pendingSeekValue = useRef<number | null>(null);
   const autoScrollSaveTimer = useRef<number | null>(null);
+  const restoreCaptureTimer = useRef<number | null>(null);
   const animeSaveTimer = useRef<number | null>(null);
   const autoScrollProgressUpdatedAt = useRef(0);
-  const saveInFlight = useRef(false);
   const restoreSavingBlocked = useRef(false);
   const navigationId = useRef(0);
   const openRequestId = useRef(0);
@@ -253,7 +253,7 @@ export default function App() {
   }, [shelfRatingScope]);
 
   const clearReaderAsyncWork = useCallback(() => {
-    [saveTimer, scrollTimer, progressFrame, seekFrame, autoScrollSaveTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
+    [saveTimer, scrollTimer, progressFrame, seekFrame, autoScrollSaveTimer, restoreCaptureTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
       if (timer.current) {
         if (timer === progressFrame || timer === seekFrame) window.cancelAnimationFrame(timer.current);
         else window.clearTimeout(timer.current);
@@ -325,6 +325,40 @@ export default function App() {
     setAnime((current) => typeof patch === "function" ? patch(current) : { ...current, ...patch });
   }
 
+  const progressSync = useMemo(() => createProgressSync({
+    storage: localStorage,
+    save: (bookId, payload) => saveProgress(bookId, payload),
+    sendOnExit: (bookId, payload) => {
+      if (!saveProgressBeacon(bookId, payload)) {
+        void saveProgressKeepalive(bookId, payload).catch(() => {});
+      }
+    },
+    makeMutationId: createId,
+    onState: (bookId, state) => {
+      const local = state.pending || state.submitted || state.confirmed;
+      const progress = local
+        ? normalizeProgress(bookId, local, { dirty: Boolean(state.pending || state.submitted) })
+        : null;
+      setReader((current) => {
+        if (current.book?.book_id !== bookId) return current;
+        return {
+          ...current,
+          progressSync: state,
+          progress: progress || current.progress,
+          visiblePercent: state.pending || state.submitted ? current.visiblePercent : (progress?.percent ?? current.visiblePercent),
+          toast: state.error || current.toast,
+        };
+      });
+      if (progress) {
+        setShelf((current) => ({
+          ...current,
+          items: current.items.map((item) => item.type === "book" && item.id === bookId ? { ...item, progress } : item),
+          continueBook: current.continueBook?.id === bookId ? { ...current.continueBook, progress } : current.continueBook,
+        }));
+      }
+    },
+  }), []);
+
   const canSaveReaderProgress = useCallback(() => {
     const currentRoute = routeRef.current;
     const currentReader = readerRef.current;
@@ -380,26 +414,11 @@ export default function App() {
   }
 
   function loadCachedProgress(bookId: number) {
-    return normalizeProgress(bookId, progressCache()[bookId]) || null;
-  }
-
-  function cacheProgress(bookId: number, progress: any, options: any = {}) {
-    const cachedProgress = normalizeProgress(bookId, {
-      ...progress,
-      version: progress.version ?? loadCachedProgress(bookId)?.version,
-      dirty: options.dirty ?? progress.dirty,
-    }, {
-      dirty: Boolean(options.dirty),
-      updated_at: new Date().toISOString(),
-    });
-    try {
-      const cache = JSON.parse(localStorage.getItem(PROGRESS_CACHE_KEY) || "{}");
-      cache[bookId] = cachedProgress;
-      localStorage.setItem(PROGRESS_CACHE_KEY, JSON.stringify(cache));
-    } catch {
-      localStorage.setItem(PROGRESS_CACHE_KEY, JSON.stringify({ [bookId]: cachedProgress }));
-    }
-    return cachedProgress;
+    const state = progressSync.getState(bookId);
+    const local = state.pending || state.submitted || state.confirmed;
+    return normalizeProgress(bookId, local, {
+      dirty: Boolean(state.pending || state.submitted),
+    }) || normalizeProgress(bookId, progressCache()[bookId]) || null;
   }
 
   function updateShelfBookProgress(progress: any) {
@@ -414,20 +433,33 @@ export default function App() {
 
   const snapshotProgress = useCallback((options: any = {}) => {
     const currentReader = readerRef.current;
-    if (!canSaveReaderProgress()) return null;
+    const canCaptureDuringRestore = Boolean(
+      options.allowDuringRestore
+      && routeRef.current.name === "reader"
+      && currentReader.book
+      && currentReader.paragraphs.length > 0
+      && !currentReader.loading,
+    );
+    if (!canSaveReaderProgress() && !canCaptureDuringRestore) return null;
     const payload = progressPayload();
-    const progress = options.persistLocal === false
-      ? normalizeProgress(currentReader.book.book_id, payload, {
-        dirty: true,
-        version: currentReader.progress?.version,
-        updated_at: new Date().toISOString(),
-      })
-      : cacheProgress(currentReader.book.book_id, payload, { dirty: options.dirty ?? true });
+    const bookId = currentReader.book.book_id;
+    progressSync.observe(bookId, {
+      ...payload,
+      ...progressMeta(options.source || "unknown", options),
+      client_id: clientId,
+      session_id: sessionId,
+    });
+    const state = progressSync.getState(bookId);
+    const local = state.pending || state.submitted || state.confirmed;
+    const progress = normalizeProgress(bookId, local || payload, {
+      dirty: Boolean(state.pending || state.submitted),
+      version: currentReader.progress?.version,
+    });
     if (!progress) return currentReader.progress;
     updateReader({ progress, visiblePercent: progress.percent });
     updateShelfBookProgress(progress);
     return progress;
-  }, [canSaveReaderProgress, progressPayload]);
+  }, [canSaveReaderProgress, clientId, progressPayload, progressSync, sessionId]);
 
   function showToast(message: string) {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -445,72 +477,25 @@ export default function App() {
     );
   }
 
-  function applySavedProgress(saved: any, expectedBookId: number | null = null, expectedTicket: any = null) {
-    const savedBookId = Number(saved?.book_id);
-    if (!Number.isFinite(savedBookId) || (expectedBookId !== null && savedBookId !== expectedBookId)) {
-      return readerRef.current.progress;
-    }
-    const currentReader = readerRef.current;
-    const normalized = normalizeProgress(savedBookId, { ...saved, book_id: savedBookId }, { dirty: false });
-    if (!normalized) return currentReader.progress;
-    const currentMatches = expectedTicket
-      ? isCurrentReaderSession(expectedTicket, savedBookId)
-      : currentReader.book?.book_id === savedBookId;
-    const local = currentMatches ? currentReader.progress : loadCachedProgress(normalized.book_id);
-    if (local?.dirty && (local.char_offset !== normalized.char_offset || local.percent !== normalized.percent)) {
-      const latest = cacheProgress(normalized.book_id, { ...local, version: normalized.version }, { dirty: true });
-      if (currentMatches) updateReader({ progress: latest });
-      return latest;
-    }
-    const cached = cacheProgress(normalized.book_id, normalized, { dirty: false });
-    if (currentMatches) updateReader({ progress: cached });
-    updateShelfBookProgress(cached);
-    return cached;
-  }
-
   const saveProgressInBackground = useCallback((source = "background", options: any = {}) => {
     const currentReader = readerRef.current;
-    const progress = options.reuseCurrent ? currentReader.progress : snapshotProgress({ source });
+    const progress = snapshotProgress({ source, ...options, allowDuringRestore: Boolean(options.reuseCurrent) });
     if (!progress || !currentReader.book) return;
-    const savingBookId = currentReader.book.book_id;
-    const savingTicket = readerTicketRef.current;
-    const payload = savePayload(progress, progressMeta(source));
-    if (!saveProgressBeacon(savingBookId, payload)) {
-      void saveProgressKeepalive(savingBookId, payload)
-        .then((saved: any) => applySavedProgress(saved, savingBookId, savingTicket))
-        .catch(() => {});
-    }
-  }, [snapshotProgress]);
+    progressSync.flushOnExit(currentReader.book.book_id);
+  }, [progressSync, snapshotProgress]);
 
   const saveProgressNow = useCallback(async (options: any = {}) => {
     const currentReader = readerRef.current;
-    const source = options.source || "debounced";
-    const progress = options.reuseCurrent ? currentReader.progress : snapshotProgress(options);
-    if (!progress || !currentReader.book || saveInFlight.current) return progress;
+    const progress = options.reuseCurrent
+      ? currentReader.progress
+      : snapshotProgress({ ...options, source: options.source || "debounced" });
+    if (!progress || !currentReader.book) return progress;
     const savingBookId = currentReader.book.book_id;
-    const savingTicket = readerTicketRef.current;
-    saveInFlight.current = true;
-    try {
-      const saved = await saveProgress(
-        savingBookId,
-        savePayload(progress, progressMeta(source, options)),
-        options,
-      );
-      if (Number(saved?.book_id) !== savingBookId) return progress;
-      if (isCurrentReaderSession(savingTicket, savingBookId)) lastSaveSucceeded.current = true;
-      return applySavedProgress(saved, savingBookId, savingTicket);
-    } catch (error) {
-      if (!isAbortError(error)) {
-        if (isCurrentReaderSession(savingTicket, savingBookId)) {
-          lastSaveSucceeded.current = false;
-          showToast(`保存失败: ${(error as Error).message}`);
-        }
-      }
-      return progress;
-    } finally {
-      saveInFlight.current = false;
-    }
-  }, [snapshotProgress]);
+    await progressSync.flush(savingBookId);
+    const state = progressSync.getState(savingBookId);
+    lastSaveSucceeded.current = !state.error;
+    return loadCachedProgress(savingBookId) || progress;
+  }, [progressSync, snapshotProgress]);
 
   const scheduleProgressSave = useCallback((delay = 650, options: any = {}) => {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
@@ -739,6 +724,20 @@ export default function App() {
     }
   }
 
+  function resolveProgressConflict(choice: "local" | "remote") {
+    const bookId = readerRef.current.book?.book_id;
+    if (!bookId) return;
+    const state = progressSync.resolveConflict(bookId, choice);
+    if (choice === "local") {
+      void progressSync.flush(bookId);
+      return;
+    }
+    const remote = state.confirmed;
+    if (!remote) return;
+    updateReader({ progress: normalizeProgress(bookId, remote, { dirty: false }), visiblePercent: remote.percent || 0 });
+    void navigateToOffset(remote.char_offset || 0, remote.percent === 1, { ticket: readerTicketRef.current, bookId });
+  }
+
   const openBook = useCallback(async (bookId: number) => {
     clearReaderAsyncWork();
     const ticket = readerScope.begin();
@@ -757,6 +756,7 @@ export default function App() {
       chapterOpen: false,
       progress: null,
       visiblePercent: 0,
+      progressSync: null,
       controlsVisible: false,
       progressSeeking: false,
       pendingSeekPercent: null,
@@ -772,19 +772,36 @@ export default function App() {
     restoreSavingBlocked.current = true;
     if (readerRoot.current) readerRoot.current.scrollTop = 0;
     try {
-      const [summary, progress] = await Promise.all([
-        getBook(bookId, { signal: ticket.signal }),
-        getProgress(bookId, { signal: ticket.signal }),
-      ]);
-      const serverProgress = normalizeProgress(bookId, progress, { dirty: false });
+      const progressRequest = getProgress(bookId, { signal: ticket.signal });
+      void progressRequest
+        .then((remoteProgress) => {
+          if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
+          const state = progressSync.reconcile(bookId, remoteProgress);
+          void progressSync.flush(bookId);
+          const current = readerRef.current;
+          const local = state.pending || state.submitted || state.confirmed;
+          const nextProgress = normalizeProgress(bookId, local, { dirty: Boolean(state.pending || state.submitted) });
+          if (current.book?.book_id !== bookId || current.progressSeeking || !nextProgress) return;
+          updateReader({ progressSync: state, progress: nextProgress, visiblePercent: nextProgress.percent });
+        })
+        .catch((error) => {
+          if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
+          updateReader((current) => ({
+            ...current,
+            progressSync: progressSync.getState(bookId),
+            toast: `进度同步失败: ${(error as Error).message}`,
+          }));
+        });
+      const summary = await getBook(bookId, { signal: ticket.signal });
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
-      const restoredProgress = chooseProgress(serverProgress, loadCachedProgress(bookId));
-      if (restoredProgress) cacheProgress(bookId, restoredProgress);
+      const restoredProgress = loadCachedProgress(bookId);
+      const progressState = progressSync.getState(bookId);
       if (summary.format === "epub") {
         updateReader({
           book: { ...summary, book_id: summary.id },
           progress: restoredProgress,
           visiblePercent: restoredProgress?.percent || 0,
+          progressSync: progressState,
           paragraphs: [],
           controlsVisible: window.matchMedia("(min-width: 760px)").matches,
           loading: false,
@@ -802,6 +819,7 @@ export default function App() {
         book: content,
         progress: restoredProgress,
         visiblePercent: restoredProgress?.percent || 0,
+        progressSync: progressState,
         paragraphs,
         chapters,
         controlsVisible: window.matchMedia("(min-width: 760px)").matches,
@@ -812,7 +830,6 @@ export default function App() {
       const offset = restoredProgress?.char_offset || offsetForPercent(restoredProgress?.percent || 0);
       const restored = await navigateToOffset(offset, restoredProgress?.percent === 1, { ticket, bookId });
       if (!restored || requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
-      if (!serverProgress || restoredProgress?.dirty) scheduleProgressSave(300, { force: true, source: "open_mark" });
     } catch (error) {
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
       updateReader({ error: (error as Error).message, loading: false });
@@ -826,25 +843,22 @@ export default function App() {
     const savingBookId = currentReader.book.book_id;
     const savingTicket = readerTicketRef.current;
     if (!isCurrentReaderSession(savingTicket, savingBookId)) return;
-    const progress = cacheProgress(currentReader.book.book_id, {
-      book_id: currentReader.book.book_id,
+    progressSync.observe(savingBookId, {
       char_offset: 0,
       percent: nextProgress.percent,
       locator: nextProgress.locator,
-    }, { dirty: true });
+      ...progressMeta("epub_relocated"),
+      client_id: clientId,
+      session_id: sessionId,
+    });
+    const state = progressSync.getState(savingBookId);
+    const local = state.pending || state.submitted || state.confirmed;
+    const progress = normalizeProgress(savingBookId, local, { dirty: Boolean(state.pending || state.submitted) });
     if (!isCurrentReaderSession(savingTicket, savingBookId)) return;
     updateReader({ progress, visiblePercent: progress?.percent || 0 });
     if (!progress) return;
-    try {
-      const saved = await saveProgress(
-        savingBookId,
-        savePayload(progress, progressMeta("epub_relocated")),
-      );
-      if (Number(saved?.book_id) === savingBookId) applySavedProgress(saved, savingBookId, savingTicket);
-    } catch (error) {
-      if (!isAbortError(error) && isCurrentReaderSession(savingTicket, savingBookId)) showToast("保存 EPUB 进度失败");
-    }
-  }, []);
+    await progressSync.flush(savingBookId);
+  }, [clientId, progressSync, sessionId]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
@@ -958,7 +972,7 @@ export default function App() {
       window.removeEventListener("resize", scheduleShelfMeasure);
       window.removeEventListener("resize", scheduleAnimeMeasure);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      [saveTimer, scrollTimer, shelfTimer, periodicSaveTimer, toastTimer, searchDebounceTimer, autoScrollSaveTimer].forEach((timer) => {
+      [saveTimer, scrollTimer, shelfTimer, periodicSaveTimer, toastTimer, searchDebounceTimer, autoScrollSaveTimer, restoreCaptureTimer].forEach((timer) => {
         if (timer.current) window.clearTimeout(timer.current);
       });
       if (progressFrame.current) window.cancelAnimationFrame(progressFrame.current);
@@ -992,7 +1006,29 @@ export default function App() {
   }, [reader.searchQuery, reader.paragraphs.length]);
 
   function onReaderScroll() {
-    if (!canSaveReaderProgress()) return;
+    if (!canSaveReaderProgress()) {
+      if (restoreSavingBlocked.current && restoreCaptureTimer.current === null) {
+        const ticket = readerTicketRef.current;
+        const bookId = readerRef.current.book?.book_id;
+        const retryCapture = (attempt: number) => {
+          restoreCaptureTimer.current = window.setTimeout(() => {
+            restoreCaptureTimer.current = null;
+            if (!bookId || !isCurrentReaderSession(ticket, bookId)) return;
+            if (!canSaveReaderProgress()) {
+              if (attempt < 10) retryCapture(attempt + 1);
+              return;
+            }
+            const root = readerRoot.current;
+            const current = readerRef.current;
+            if (!root || (!current.progress && root.scrollTop <= 1)) return;
+            snapshotProgress({ source: "scroll_after_restore" });
+            scheduleProgressSave(450, { source: "scroll_after_restore" });
+          }, 120);
+        };
+        retryCapture(0);
+      }
+      return;
+    }
     if (readerRef.current.progressSeeking) return;
     if (readerRef.current.autoScrollPlaying) {
       const now = performance.now();
@@ -1886,6 +1922,14 @@ export default function App() {
             <div className="save-toast" role="alert">
               <AlertTriangle size={14} />
               <span>{reader.toast}</span>
+            </div>
+          )}
+          {reader.progressSync?.conflict && (
+            <div className="save-toast progress-conflict" role="alert">
+              <AlertTriangle size={14} />
+              <span>存在未同步的本地位置，与服务端进度不同</span>
+              <button type="button" onClick={() => resolveProgressConflict("local")}>继续本地位置</button>
+              <button type="button" onClick={() => resolveProgressConflict("remote")}>使用服务器位置</button>
             </div>
           )}
           {reader.error && <p className="error reader-error">{reader.error}</p>}

@@ -93,9 +93,9 @@ export function getProgress(id, options = {}) {
   return request(`/api/books/${id}/progress`, options);
 }
 
-export function saveProgress(id, progress, options = {}) {
+function saveProgressRequest(id, progress, options = {}) {
   return request(`/api/books/${id}/progress`, {
-    method: "PUT",
+    method: options.method || "PUT",
     headers: jsonHeaders,
     body: JSON.stringify(progress),
     keepalive: Boolean(options.keepalive),
@@ -103,14 +103,12 @@ export function saveProgress(id, progress, options = {}) {
   });
 }
 
+export function saveProgress(id, progress, options = {}) {
+  return saveProgressRequest(id, progress, options);
+}
+
 export function saveProgressKeepalive(id, progress, options = {}) {
-  return request(`/api/books/${id}/progress`, {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(progress),
-    keepalive: true,
-    signal: options.signal,
-  });
+  return saveProgressRequest(id, progress, { ...options, method: "POST", keepalive: true });
 }
 
 export function saveProgressBeacon(id, progress) {

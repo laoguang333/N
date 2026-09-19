@@ -1,4 +1,5 @@
 export const PROGRESS_CACHE_KEY = "txt-reader-progress";
+export const PROGRESS_CACHE_V2_KEY = "txt-reader-progress-v2";
 
 export function chooseProgress(server, local) {
   if (!server) return local;
@@ -25,6 +26,10 @@ export function normalizeProgress(bookId, progress, fallback = {}) {
     percent: clampPercent(progress.percent),
     locator: typeof progress.locator === "string" && progress.locator ? progress.locator : null,
     version: Number.isInteger(progress.version) ? progress.version : fallback.version ?? null,
+    mutation_id: typeof progress.mutation_id === "string" && progress.mutation_id ? progress.mutation_id : null,
+    position_kind: typeof progress.position_kind === "string" && progress.position_kind ? progress.position_kind : null,
+    paragraph_fraction: clampFraction(progress.paragraph_fraction),
+    base_version: Number.isInteger(progress.base_version) ? progress.base_version : fallback.base_version ?? null,
     updated_at: progress.updated_at || fallback.updated_at || new Date().toISOString(),
     dirty: Boolean(progress.dirty ?? fallback.dirty),
   };
@@ -49,8 +54,19 @@ export function savePayload(progress, meta = {}) {
   if (progress.locator) {
     payload.locator = progress.locator;
   }
-  if (Number.isInteger(progress.version)) {
-    payload.base_version = progress.version;
+  const baseVersion = meta.baseVersion ?? progress.base_version ?? progress.version;
+  if (Number.isInteger(baseVersion)) {
+    payload.base_version = baseVersion;
+  }
+  const mutationId = meta.mutationId || progress.mutation_id;
+  if (mutationId) {
+    payload.mutation_id = mutationId;
+  }
+  if (progress.position_kind) {
+    payload.position_kind = progress.position_kind;
+  }
+  if (Number.isFinite(progress.paragraph_fraction)) {
+    payload.paragraph_fraction = clampFraction(progress.paragraph_fraction);
   }
   return payload;
 }
@@ -74,6 +90,17 @@ function clampPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) {
     return 0;
+  }
+  return Math.min(1, Math.max(0, number));
+}
+
+function clampFraction(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return null;
   }
   return Math.min(1, Math.max(0, number));
 }

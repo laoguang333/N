@@ -1,5 +1,13 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { getBook, getBookContent, getProgress, getShelf, listBooks } from "./api";
+import {
+  getBook,
+  getBookContent,
+  getProgress,
+  getShelf,
+  listBooks,
+  saveProgress,
+  saveProgressKeepalive,
+} from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -54,4 +62,20 @@ test("AbortError from fetch is propagated unchanged", async () => {
   vi.spyOn(globalThis, "fetch").mockRejectedValue(abortError);
 
   await expect(getProgress(7)).rejects.toBe(abortError);
+});
+
+test("normal progress save channels carry the same versioned JSON payload", async () => {
+  const payload = {
+    char_offset: 42,
+    percent: 0.42,
+    mutation_id: "M42",
+    base_version: 7,
+    position_kind: "paragraph_utf16_lf_v1",
+    paragraph_fraction: 0.25,
+  };
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ book_id: 7, ...payload, version: 8 }));
+  await saveProgress(7, payload);
+  await saveProgressKeepalive(7, payload);
+
+  expect(fetchMock.mock.calls.slice(-2).map(([, options]) => JSON.parse(options.body))).toEqual([payload, payload]);
 });
