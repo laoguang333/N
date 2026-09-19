@@ -99,10 +99,9 @@ test.describe("safe reader progress lifecycle", () => {
 
   test("a failed progress save does not block leaving the reader", async ({ page }) => {
     const fixture = await setup(page, { failWrites: true });
-    await page.locator(".reader-content").evaluate((element) => {
-      element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) * 0.4);
-      element.dispatchEvent(new Event("scroll"));
-    });
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 5000);
+    await expect.poll(() => page.locator(".reader-content").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
     await page.getByRole("button", { name: "返回书架" }).click();
     await expect(page.locator(".shelf-view")).toBeVisible();
     expect(fixture.writes.length).toBeGreaterThan(0);
@@ -110,10 +109,9 @@ test.describe("safe reader progress lifecycle", () => {
 
   test("repeated close events reuse the same submitted mutation", async ({ page }) => {
     const fixture = await setup(page);
-    await page.locator(".reader-content").evaluate((element) => {
-      element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) * 0.3);
-      element.dispatchEvent(new Event("scroll"));
-    });
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 5000);
+    await expect.poll(() => page.locator(".reader-content").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
     await page.evaluate(() => {
       window.dispatchEvent(new PageTransitionEvent("pagehide"));
       window.dispatchEvent(new PageTransitionEvent("pagehide"));

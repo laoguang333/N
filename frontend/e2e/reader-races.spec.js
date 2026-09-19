@@ -189,10 +189,12 @@ test.describe("reader request races", () => {
         return json(route, { book_id: id, char_offset: 10, percent: 0.1, version: 1 });
       }
       if (url.pathname === "/api/books/1/content") {
-        return json(route, { book_id: 1, title: "Book A", content: "A content", length: 9, encoding: "UTF-8" });
+        const content = "A content\n\n".repeat(80);
+        return json(route, { book_id: 1, title: "Book A", content, length: content.length, encoding: "UTF-8" });
       }
       if (url.pathname === "/api/books/2/content") {
-        return json(route, { book_id: 2, title: "Book B", content: "B content", length: 9, encoding: "UTF-8" });
+        const content = "B content\n\n".repeat(80);
+        return json(route, { book_id: 2, title: "Book B", content, length: content.length, encoding: "UTF-8" });
       }
       if (url.pathname === "/api/books/1/progress" && ["PUT", "POST"].includes(request.method())) {
         aSaveStarted = true;
@@ -210,9 +212,13 @@ test.describe("reader request races", () => {
     await page.goto("/");
     await page.locator(".book-row", { hasText: "Book A" }).click();
     await expect(page.locator(".reader-content")).toContainText("A content");
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 5000);
     await expect.poll(() => aSaveStarted).toBe(true);
     await page.evaluate(() => { window.location.hash = "#/reader/2"; });
     await expect(page.locator(".reader-content")).toContainText("B content");
+    await page.locator(".reader-content").hover();
+    await page.mouse.wheel(0, 5000);
     releaseA.resolve();
     await expect.poll(() => bWrites.length, { timeout: 5000 }).toBeGreaterThan(0);
     await expect(page.getByText("A periodic failure")).toHaveCount(0);

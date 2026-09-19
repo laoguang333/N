@@ -225,6 +225,7 @@ export default function App() {
   const searchRevealFrame = useRef<number | null>(null);
   const animeSaveTimer = useRef<number | null>(null);
   const autoScrollProgressUpdatedAt = useRef(0);
+  const readerMovementPending = useRef(false);
   const restoreSavingBlocked = useRef(false);
   const restoreSessionRef = useRef<any>(null);
   const navigationId = useRef(0);
@@ -271,6 +272,7 @@ export default function App() {
     readerScope.invalidate();
     readerTicketRef.current = null;
     restoreSessionRef.current = null;
+    readerMovementPending.current = false;
     openRequestId.current += 1;
     navigationId.current += 1;
     clearReaderAsyncWork();
@@ -493,6 +495,7 @@ export default function App() {
 
   const snapshotProgress = useCallback((options: any = {}) => {
     const currentReader = readerRef.current;
+    if (options.requireMovement && !readerMovementPending.current) return currentReader.progress;
     const canCaptureDuringRestore = Boolean(
       options.allowDuringRestore
       && routeRef.current.name === "reader"
@@ -510,6 +513,7 @@ export default function App() {
       client_id: clientId,
       session_id: sessionId,
     });
+    readerMovementPending.current = false;
     const state = progressSync.getState(bookId);
     const local = state.pending || state.submitted || state.confirmed;
     const progress = normalizeProgress(bookId, local || payload, {
@@ -538,10 +542,10 @@ export default function App() {
     );
   }
 
-  const saveProgressInBackground = useCallback((source = "background", options: any = {}) => {
+  const saveProgressInBackground = useCallback((source = "background") => {
     const currentReader = readerRef.current;
-    const progress = snapshotProgress({ source, ...options, allowDuringRestore: Boolean(options.reuseCurrent) });
-    if (!progress || !currentReader.book) return;
+    snapshotProgress({ source, requireMovement: true });
+    if (!currentReader.book) return;
     progressSync.flushOnExit(currentReader.book.book_id);
   }, [progressSync, snapshotProgress]);
 
@@ -586,14 +590,14 @@ export default function App() {
         return;
       }
       if (!isCurrentReaderSession(ticket, bookId)) return;
-      const currentReader = readerRef.current;
-      if (!canSaveReaderProgress() || currentReader.loading) {
+      const state = progressSync.getState(bookId);
+      if (!state.pending && !state.submitted) {
         schedulePeriodicSave(SAVE_BASE_INTERVAL);
         return;
       }
-      snapshotProgress({ source: "periodic" });
-      void saveProgressNow({ quiet: true, source: "periodic", reuseCurrent: true }).then(() => {
+      void progressSync.flush(bookId).then(() => {
         if (isCurrentReaderSession(ticket, bookId)) {
+          lastSaveSucceeded.current = !progressSync.getState(bookId).error;
           if (lastSaveSucceeded.current) {
             saveFailureCount.current = 0;
             schedulePeriodicSave(SAVE_BASE_INTERVAL);
@@ -614,7 +618,7 @@ export default function App() {
         }
       });
     }, delay);
-  }, [canSaveReaderProgress, saveProgressNow, snapshotProgress]);
+  }, [progressSync]);
 
   const scheduleShelfMeasure = useCallback(() => {
     if (routeRef.current.name !== "shelf") return;
@@ -884,6 +888,7 @@ export default function App() {
     clearReaderAsyncWork();
     const ticket = readerScope.begin();
     readerTicketRef.current = ticket;
+    readerMovementPending.current = false;
     restoreSessionRef.current = { ticket, bookId, userInteracted: false, appliedKey: null };
     saveFailureCount.current = 0;
     lastSaveSucceeded.current = true;
@@ -1035,7 +1040,7 @@ export default function App() {
       const current = routeRef.current;
       if (current.name === "reader" && (!next.bookId || next.bookId !== current.bookId)) {
         clearReaderAsyncWork();
-        saveProgressInBackground("route_change", { reuseCurrent: true });
+        saveProgressInBackground("route_change");
         invalidateReaderSession();
       }
       if (next.name !== "reader") updateReader({ settingsOpen: false });
@@ -1108,16 +1113,8 @@ export default function App() {
     function onVisibilityChange() {
       if (document.visibilityState === "hidden") flushProgress("visibility_hidden");
     }
-    function onReaderInteractionEnd() {
-      if (canSaveReaderProgress() && !readerRef.current.progressSeeking) {
-        snapshotProgress({ source: "interaction_end" });
-        scheduleProgressSave(300, { source: "interaction_end" });
-      }
-    }
     window.addEventListener("beforeunload", flushProgress);
     window.addEventListener("pagehide", flushProgress);
-    window.addEventListener("touchend", onReaderInteractionEnd, { passive: true });
-    window.addEventListener("pointerup", onReaderInteractionEnd, { passive: true });
     window.addEventListener("resize", scheduleShelfMeasure, { passive: true });
     window.addEventListener("resize", scheduleAnimeMeasure, { passive: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -1125,8 +1122,6 @@ export default function App() {
     return () => {
       window.removeEventListener("beforeunload", flushProgress);
       window.removeEventListener("pagehide", flushProgress);
-      window.removeEventListener("touchend", onReaderInteractionEnd);
-      window.removeEventListener("pointerup", onReaderInteractionEnd);
       window.removeEventListener("resize", scheduleShelfMeasure);
       window.removeEventListener("resize", scheduleAnimeMeasure);
       document.removeEventListener("visibilitychange", onVisibilityChange);
@@ -1174,6 +1169,7 @@ export default function App() {
   function onReaderScroll() {
     if (restoreSavingBlocked.current || !canSaveReaderProgress()) return;
     if (readerRef.current.progressSeeking) return;
+    readerMovementPending.current = true;
     if (readerRef.current.autoScrollPlaying) {
       const now = performance.now();
       if (now - autoScrollProgressUpdatedAt.current > 160) {
@@ -1514,6 +1510,7 @@ export default function App() {
     updateReader({ activeSearchId: result.id, controlsVisible: true, searchOpen: false, autoScrollPlaying: false });
     void navigateToOffset(result.offset).then((completed) => {
       if (completed) {
+        readerMovementPending.current = true;
         snapshotProgress({ source: "search", allowBackward: true });
         scheduleProgressSave(250, { source: "search", allowBackward: true });
       }
@@ -1544,6 +1541,7 @@ export default function App() {
     updateReader({ chapterOpen: false, controlsVisible: true, autoScrollPlaying: false });
     void navigateToOffset(chapter.offset).then((completed) => {
       if (completed) {
+        readerMovementPending.current = true;
         snapshotProgress({ source: "chapter", allowBackward: true });
         scheduleProgressSave(250, { source: "chapter", allowBackward: true });
       }
@@ -1554,6 +1552,7 @@ export default function App() {
     if (!await navigateToOffset(offsetForPercent(percent), percent === 1)) return;
     pendingSeekValue.current = null;
     updateReader({ progressSeeking: false, pendingSeekPercent: null });
+    readerMovementPending.current = true;
     snapshotProgress({ source: "seek", allowBackward: true });
     scheduleProgressSave(250, { source: "seek", allowBackward: true });
   }
@@ -1574,6 +1573,7 @@ export default function App() {
   }
 
   function onManualReaderScroll() {
+    readerMovementPending.current = true;
     const restoreSession = restoreSessionRef.current;
     if (restoreSession && restoreSession.bookId === readerRef.current.book?.book_id) {
       restoreSession.userInteracted = true;
@@ -1588,7 +1588,6 @@ export default function App() {
   }
 
   function changeTextSetting(key: "fontSize" | "lineHeight" | "paragraphSpacing", value: number) {
-    snapshotProgress({ source: "settings" });
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
