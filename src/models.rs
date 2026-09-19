@@ -33,14 +33,20 @@ pub struct ReadingProgress {
     pub percent: f64,
     pub locator: Option<String>,
     pub version: i64,
+    pub mutation_id: Option<String>,
+    pub position_kind: Option<String>,
+    pub paragraph_fraction: Option<f64>,
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct SaveProgressRequest {
     pub char_offset: i64,
     pub percent: f64,
     pub locator: Option<String>,
+    pub mutation_id: Option<String>,
+    pub position_kind: Option<String>,
+    pub paragraph_fraction: Option<f64>,
     pub source: Option<String>,
     pub client_id: Option<String>,
     pub session_id: Option<String>,

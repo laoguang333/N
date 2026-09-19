@@ -5,12 +5,24 @@ use axum::{
 };
 use serde::Serialize;
 
+use crate::models::ReadingProgress;
+
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
     NotFound(String),
-    Conflict(String),
-    ConflictCode { message: String, code: String },
+    ConflictCode {
+        message: String,
+        code: String,
+    },
+    ProgressProtocolUpgradeRequired {
+        message: String,
+        current: Option<Box<ReadingProgress>>,
+    },
+    ProgressConflict {
+        message: String,
+        current: Option<Box<ReadingProgress>>,
+    },
     Internal(anyhow::Error),
 }
 
@@ -19,20 +31,35 @@ struct ErrorBody {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    current: Option<ReadingProgress>,
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message, code) = match self {
-            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
-            AppError::NotFound(message) => (StatusCode::NOT_FOUND, message, None),
-            AppError::Conflict(message) => (StatusCode::CONFLICT, message, None),
-            AppError::ConflictCode { message, code } => (StatusCode::CONFLICT, message, Some(code)),
+        let (status, message, code, current) = match self {
+            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None, None),
+            AppError::NotFound(message) => (StatusCode::NOT_FOUND, message, None, None),
+            AppError::ConflictCode { message, code } => {
+                (StatusCode::CONFLICT, message, Some(code), None)
+            }
+            AppError::ProgressProtocolUpgradeRequired { message, current } => (
+                StatusCode::PRECONDITION_REQUIRED,
+                message,
+                Some("progress_protocol_upgrade_required".to_string()),
+                current.map(|current| *current),
+            ),
+            AppError::ProgressConflict { message, current } => (
+                StatusCode::CONFLICT,
+                message,
+                Some("progress_conflict".to_string()),
+                current.map(|current| *current),
+            ),
             AppError::Internal(error) => {
                 tracing::error!("{error:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),
+                    None,
                     None,
                 )
             }
@@ -43,6 +70,7 @@ impl IntoResponse for AppError {
             Json(ErrorBody {
                 error: message,
                 code,
+                current,
             }),
         )
             .into_response()

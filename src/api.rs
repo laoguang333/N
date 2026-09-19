@@ -33,6 +33,8 @@ use crate::{
     },
 };
 
+const PARAGRAPH_POSITION_KIND: &str = "paragraph_utf16_lf_v1";
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -1086,6 +1088,9 @@ async fn list_books_internal(
             p.percent AS progress_percent,
             p.locator AS progress_locator,
             p.version AS progress_version,
+            p.last_mutation_id AS progress_mutation_id,
+            p.position_kind AS progress_position_kind,
+            p.paragraph_fraction AS progress_paragraph_fraction,
             p.updated_at AS progress_updated_at
         FROM books b
         LEFT JOIN reading_progress p ON p.book_id = b.id
@@ -1166,6 +1171,9 @@ async fn fetch_book_summary(db: &SqlitePool, id: i64) -> Result<BookSummary, App
             p.percent AS progress_percent,
             p.locator AS progress_locator,
             p.version AS progress_version,
+            p.last_mutation_id AS progress_mutation_id,
+            p.position_kind AS progress_position_kind,
+            p.paragraph_fraction AS progress_paragraph_fraction,
             p.updated_at AS progress_updated_at
         FROM books b
         LEFT JOIN reading_progress p ON p.book_id = b.id
@@ -1231,10 +1239,63 @@ async fn save_progress(
     headers: HeaderMap,
     Json(payload): Json<SaveProgressRequest>,
 ) -> Result<Json<ReadingProgress>, AppError> {
-    let (title, _, _) = require_book(&state.db, id).await?;
+    let Some(base_version) = payload.base_version else {
+        return Err(AppError::ProgressProtocolUpgradeRequired {
+            message: "base_version is required for progress writes".to_string(),
+            current: None,
+        });
+    };
+    if base_version < 0 {
+        return Err(AppError::BadRequest(
+            "base_version must be non-negative".to_string(),
+        ));
+    }
+
+    let Some(mutation_id) = payload
+        .mutation_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(AppError::ProgressProtocolUpgradeRequired {
+            message: "mutation_id is required for progress writes".to_string(),
+            current: None,
+        });
+    };
+    if mutation_id.len() > 128 {
+        return Err(AppError::BadRequest(
+            "mutation_id must be between 1 and 128 bytes".to_string(),
+        ));
+    }
 
     if !payload.percent.is_finite() {
         return Err(AppError::BadRequest("percent must be finite".to_string()));
+    }
+
+    let position_kind = payload.position_kind.as_deref();
+    match position_kind {
+        None if payload.paragraph_fraction.is_some() => {
+            return Err(AppError::BadRequest(
+                "paragraph_fraction requires position_kind".to_string(),
+            ));
+        }
+        None => {}
+        Some(PARAGRAPH_POSITION_KIND) => {
+            let Some(fraction) = payload.paragraph_fraction else {
+                return Err(AppError::BadRequest(
+                    "paragraph_fraction is required for paragraph_utf16_lf_v1".to_string(),
+                ));
+            };
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(AppError::BadRequest(
+                    "paragraph_fraction must be finite and between 0 and 1".to_string(),
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "unknown progress position_kind".to_string(),
+            ));
+        }
     }
 
     let char_offset = payload.char_offset.max(0);
@@ -1246,61 +1307,115 @@ async fn save_progress(
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("unknown");
-
-    let current = fetch_progress(&state.db, id).await?;
     let allow_backward = payload.allow_backward.unwrap_or(false);
 
-    if let Some(current) = current {
-        if let Some(base_version) = payload.base_version
-            && base_version != current.version
-        {
-            return Err(AppError::Conflict(format!(
-                "reading progress changed (expected version {base_version}, current version {})",
-                current.version
-            )));
-        }
-        let result = sqlx::query(
+    let (title, _, _) = require_book(&state.db, id).await?;
+    let mut tx = state.db.begin().await?;
+
+    let saved = if base_version == 0 {
+        sqlx::query(
+            r#"
+            INSERT INTO reading_progress (
+                book_id, char_offset, percent, locator, version,
+                last_mutation_id, position_kind, paragraph_fraction
+            )
+            VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7)
+            ON CONFLICT(book_id) DO NOTHING
+            RETURNING book_id, char_offset, percent, locator, version,
+                      last_mutation_id, position_kind, paragraph_fraction, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(char_offset)
+        .bind(percent)
+        .bind(payload.locator.as_deref())
+        .bind(mutation_id)
+        .bind(position_kind)
+        .bind(payload.paragraph_fraction)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_progress_write_error)?
+        .map(progress_from_row)
+        .transpose()?
+    } else {
+        sqlx::query(
             r#"
             UPDATE reading_progress
             SET
                 char_offset = ?2,
                 percent = ?3,
                 locator = ?4,
+                last_mutation_id = ?5,
+                position_kind = ?6,
+                paragraph_fraction = ?7,
                 version = version + 1,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE book_id = ?1 AND (?5 IS NULL OR version = ?5)
+            WHERE book_id = ?1
+              AND version = ?8
+              AND (last_mutation_id IS NULL OR last_mutation_id <> ?5)
+            RETURNING book_id, char_offset, percent, locator, version,
+                      last_mutation_id, position_kind, paragraph_fraction, updated_at
             "#,
         )
         .bind(id)
         .bind(char_offset)
         .bind(percent)
         .bind(payload.locator.as_deref())
-        .bind(payload.base_version)
-        .execute(&state.db)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::Conflict(
-                "reading progress changed while saving".to_string(),
-            ));
-        }
-    } else {
-        sqlx::query(
-            r#"
-            INSERT INTO reading_progress (book_id, char_offset, percent, locator, version)
-            VALUES (?1, ?2, ?3, ?4, 1)
-            "#,
-        )
-        .bind(id)
-        .bind(char_offset)
-        .bind(percent)
-        .bind(payload.locator.as_deref())
-        .execute(&state.db)
-        .await?;
-    }
+        .bind(mutation_id)
+        .bind(position_kind)
+        .bind(payload.paragraph_fraction)
+        .bind(base_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_progress_write_error)?
+        .map(progress_from_row)
+        .transpose()?
+    };
 
-    let saved = fetch_progress(&state.db, id)
-        .await?
-        .expect("progress exists after save");
+    let saved = match saved {
+        Some(saved) => saved,
+        None => {
+            let current = fetch_progress_with_connection(&mut tx, id).await?;
+            if let Some(current) = current {
+                if current.mutation_id.as_deref() == Some(mutation_id)
+                    && progress_payload_matches(
+                        &current,
+                        char_offset,
+                        percent,
+                        payload.locator.as_deref(),
+                        position_kind,
+                        payload.paragraph_fraction,
+                    )
+                {
+                    tx.commit().await?;
+                    return Ok(Json(current));
+                }
+
+                return Err(AppError::ProgressConflict {
+                    message: format!(
+                        "reading progress changed (expected version {base_version}, current version {})",
+                        current.version
+                    ),
+                    current: Some(Box::new(current)),
+                });
+            }
+
+            let book_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM books WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if book_exists.is_none() {
+                return Err(AppError::NotFound("book not found".to_string()));
+            }
+
+            return Err(AppError::ProgressConflict {
+                message: format!("reading progress is missing (expected version {base_version})"),
+                current: None,
+            });
+        }
+    };
+
+    tx.commit().await?;
     tracing::info!(
         book_id = id,
         title = %title,
@@ -1315,6 +1430,34 @@ async fn save_progress(
     );
 
     Ok(Json(saved))
+}
+
+fn map_progress_write_error(error: sqlx::Error) -> AppError {
+    let is_missing_book = matches!(
+        &error,
+        sqlx::Error::Database(database)
+            if database.code().as_deref() == Some("787")
+    );
+    if is_missing_book {
+        AppError::NotFound("book not found".to_string())
+    } else {
+        AppError::Internal(error.into())
+    }
+}
+
+fn progress_payload_matches(
+    current: &ReadingProgress,
+    char_offset: i64,
+    percent: f64,
+    locator: Option<&str>,
+    position_kind: Option<&str>,
+    paragraph_fraction: Option<f64>,
+) -> bool {
+    current.char_offset == char_offset
+        && current.percent == percent
+        && current.locator.as_deref() == locator
+        && current.position_kind.as_deref() == position_kind
+        && current.paragraph_fraction == paragraph_fraction
 }
 
 async fn save_rating(
@@ -1360,6 +1503,9 @@ fn book_from_row(row: sqlx::sqlite::SqliteRow) -> Result<BookSummary, sqlx::Erro
             percent: row.try_get("progress_percent")?,
             locator: row.try_get("progress_locator")?,
             version: row.try_get("progress_version")?,
+            mutation_id: row.try_get("progress_mutation_id")?,
+            position_kind: row.try_get("progress_position_kind")?,
+            paragraph_fraction: row.try_get("progress_paragraph_fraction")?,
             updated_at: row.try_get("progress_updated_at")?,
         }),
         None => None,
@@ -1389,13 +1535,30 @@ fn progress_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadingProgress, sq
         percent: row.try_get("percent")?,
         locator: row.try_get("locator")?,
         version: row.try_get("version")?,
+        mutation_id: row.try_get("last_mutation_id")?,
+        position_kind: row.try_get("position_kind")?,
+        paragraph_fraction: row.try_get("paragraph_fraction")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
 
 async fn fetch_progress(db: &SqlitePool, id: i64) -> Result<Option<ReadingProgress>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT book_id, char_offset, percent, locator, version, updated_at FROM reading_progress WHERE book_id = ?1",
+        "SELECT book_id, char_offset, percent, locator, version, last_mutation_id, position_kind, paragraph_fraction, updated_at FROM reading_progress WHERE book_id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    row.map(progress_from_row).transpose()
+}
+
+async fn fetch_progress_with_connection(
+    db: &mut sqlx::SqliteConnection,
+    id: i64,
+) -> Result<Option<ReadingProgress>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT book_id, char_offset, percent, locator, version, last_mutation_id, position_kind, paragraph_fraction, updated_at FROM reading_progress WHERE book_id = ?1",
     )
     .bind(id)
     .fetch_optional(db)
@@ -1591,11 +1754,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_progress_supports_legacy_writes_and_rejects_stale_versions() {
+    async fn save_progress_requires_the_versioned_protocol() {
         let fixture = TestFixture::new("progress-version").await;
         let id = fixture.insert_book("Book", -1.0, None).await;
 
-        let Json(first) = save_progress(
+        let missing_version = save_progress(
             State(fixture.state.clone()),
             Path(id),
             HeaderMap::new(),
@@ -1603,6 +1766,9 @@ mod tests {
                 char_offset: 100,
                 percent: 0.5,
                 locator: None,
+                mutation_id: Some("m1".to_string()),
+                position_kind: None,
+                paragraph_fraction: None,
                 source: Some("test".to_string()),
                 client_id: None,
                 session_id: None,
@@ -1611,8 +1777,137 @@ mod tests {
             }),
         )
         .await
+        .unwrap_err();
+        let response = missing_version.into_response();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "progress_protocol_upgrade_required");
+
+        let missing_mutation = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 100,
+                percent: 0.5,
+                locator: None,
+                mutation_id: None,
+                position_kind: None,
+                paragraph_fraction: None,
+                source: None,
+                client_id: None,
+                session_id: None,
+                allow_backward: None,
+                base_version: Some(0),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            missing_mutation.into_response().status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let empty_mutation = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                mutation_id: Some(String::new()),
+                ..progress_request_defaults()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            empty_mutation.into_response().status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn save_progress_is_idempotent_and_conflict_safe() {
+        let fixture = TestFixture::new("progress-idempotency").await;
+        let id = fixture.insert_book("Book", -1.0, None).await;
+        let first_payload = SaveProgressRequest {
+            char_offset: 100,
+            percent: 0.5,
+            locator: None,
+            mutation_id: Some("m1".to_string()),
+            position_kind: Some("paragraph_utf16_lf_v1".to_string()),
+            paragraph_fraction: Some(0.25),
+            source: Some("test".to_string()),
+            client_id: None,
+            session_id: None,
+            allow_backward: None,
+            base_version: Some(0),
+        };
+
+        let Json(first) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(first_payload.clone()),
+        )
+        .await
         .unwrap();
-        assert_eq!(first.percent, 0.5);
+        assert_eq!(first.version, 1);
+        assert_eq!(first.mutation_id.as_deref(), Some("m1"));
+        assert_eq!(
+            first.position_kind.as_deref(),
+            Some("paragraph_utf16_lf_v1")
+        );
+        assert_eq!(first.paragraph_fraction, Some(0.25));
+
+        let Json(retry) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(first_payload.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.version, first.version);
+        assert_eq!(retry.updated_at, first.updated_at);
+
+        let changed_mutation = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 101,
+                ..first_payload.clone()
+            }),
+        )
+        .await
+        .unwrap_err();
+        let response = changed_mutation.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "progress_conflict");
+        assert_eq!(body["current"]["version"], 1);
+
+        let Json(second) = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                char_offset: 20,
+                percent: 0.1,
+                mutation_id: Some("m2".to_string()),
+                base_version: Some(first.version),
+                allow_backward: Some(true),
+                ..first_payload.clone()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.version, 2);
+        assert_eq!(second.percent, 0.1);
 
         let stale = save_progress(
             State(fixture.state.clone()),
@@ -1621,75 +1916,253 @@ mod tests {
             Json(SaveProgressRequest {
                 char_offset: 120,
                 percent: 0.6,
-                locator: None,
-                source: Some("stale-test".to_string()),
-                client_id: None,
-                session_id: None,
-                allow_backward: None,
-                base_version: Some(first.version - 1),
+                mutation_id: Some("m3".to_string()),
+                base_version: Some(first.version),
+                ..first_payload.clone()
             }),
         )
-        .await;
-        assert!(matches!(stale, Err(AppError::Conflict(_))));
+        .await
+        .unwrap_err();
+        let response = stale.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["current"]["version"], 2);
 
-        let Json(second) = save_progress(
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn save_progress_rejects_invalid_protocol_values() {
+        let fixture = TestFixture::new("progress-validation").await;
+        let id = fixture.insert_book("Book", -1.0, None).await;
+        let cases = [
+            SaveProgressRequest {
+                base_version: Some(-1),
+                mutation_id: Some("m".to_string()),
+                ..progress_request_defaults()
+            },
+            SaveProgressRequest {
+                base_version: Some(0),
+                mutation_id: Some("x".repeat(129)),
+                ..progress_request_defaults()
+            },
+            SaveProgressRequest {
+                base_version: Some(0),
+                mutation_id: Some("m".to_string()),
+                position_kind: Some("unknown".to_string()),
+                ..progress_request_defaults()
+            },
+            SaveProgressRequest {
+                base_version: Some(0),
+                mutation_id: Some("m".to_string()),
+                position_kind: Some("paragraph_utf16_lf_v1".to_string()),
+                paragraph_fraction: Some(1.1),
+                ..progress_request_defaults()
+            },
+            SaveProgressRequest {
+                base_version: Some(0),
+                mutation_id: Some("m".to_string()),
+                position_kind: Some("paragraph_utf16_lf_v1".to_string()),
+                paragraph_fraction: None,
+                ..progress_request_defaults()
+            },
+        ];
+        for payload in cases {
+            let error = save_progress(
+                State(fixture.state.clone()),
+                Path(id),
+                HeaderMap::new(),
+                Json(payload),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+
+        let error = save_progress(
             State(fixture.state.clone()),
             Path(id),
             HeaderMap::new(),
             Json(SaveProgressRequest {
-                char_offset: 180,
-                percent: 0.9,
-                locator: None,
-                source: Some("test".to_string()),
-                client_id: None,
-                session_id: None,
-                allow_backward: None,
-                base_version: None,
+                paragraph_fraction: Some(f64::NAN),
+                ..progress_request_defaults()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn progress_fields_are_mapped_by_all_book_endpoints() {
+        let fixture = TestFixture::new("progress-mapping").await;
+        let id = fixture.insert_book("Book", -1.0, None).await;
+        sqlx::query(
+            "INSERT INTO reading_progress (book_id, char_offset, percent, version, last_mutation_id, position_kind, paragraph_fraction) VALUES (?1, 11, 0.4, 7, 'm7', 'paragraph_utf16_lf_v1', 0.75)",
+        )
+        .bind(id)
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+
+        let Json(list) = list_books(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: None,
+                min_rating: None,
+                folder_tag: None,
+                sort: None,
             }),
         )
         .await
         .unwrap();
-        assert_eq!(second.percent, 0.9);
+        let progress = list[0].progress.as_ref().unwrap();
+        assert_eq!(progress.version, 7);
+        assert_eq!(progress.mutation_id.as_deref(), Some("m7"));
+        assert_eq!(
+            progress.position_kind.as_deref(),
+            Some("paragraph_utf16_lf_v1")
+        );
+        assert_eq!(progress.paragraph_fraction, Some(0.75));
 
-        let Json(reset) = save_progress(
+        let Json(book) = get_book(State(fixture.state.clone()), Path(id))
+            .await
+            .unwrap();
+        assert_eq!(book.progress.unwrap().mutation_id.as_deref(), Some("m7"));
+
+        let Json(shelf) = shelf(
+            State(fixture.state.clone()),
+            Query(BookListQuery {
+                search: None,
+                status: None,
+                min_rating: None,
+                folder_tag: None,
+                sort: None,
+            }),
+        )
+        .await
+        .unwrap();
+        match &shelf.items[0] {
+            ShelfItem::Book { book } => {
+                assert_eq!(
+                    book.progress.as_ref().unwrap().position_kind.as_deref(),
+                    Some("paragraph_utf16_lf_v1")
+                );
+            }
+            ShelfItem::Folder { .. } => panic!("expected book shelf item"),
+        }
+
+        let Json(progress) = get_progress(State(fixture.state.clone()), Path(id))
+            .await
+            .unwrap();
+        assert_eq!(progress.unwrap().paragraph_fraction, Some(0.75));
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_progress_writes_are_insert_or_conflict() {
+        let fixture = TestFixture::new("progress-concurrency").await;
+        let id = fixture.insert_book("Book", -1.0, None).await;
+        let left = save_progress(
             State(fixture.state.clone()),
             Path(id),
             HeaderMap::new(),
             Json(SaveProgressRequest {
-                char_offset: 0,
-                percent: 0.0,
-                locator: None,
-                source: Some("pagehide".to_string()),
-                client_id: None,
-                session_id: None,
-                allow_backward: None,
-                base_version: None,
+                char_offset: 10,
+                percent: 0.1,
+                mutation_id: Some("left".to_string()),
+                base_version: Some(0),
+                ..progress_request_defaults()
             }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(reset.percent, 0.0);
-
-        let Json(explicit_seek) = save_progress(
+        );
+        let right = save_progress(
             State(fixture.state.clone()),
             Path(id),
             HeaderMap::new(),
             Json(SaveProgressRequest {
                 char_offset: 20,
-                percent: 0.0005,
-                locator: None,
-                source: Some("seek".to_string()),
-                client_id: None,
-                session_id: None,
-                allow_backward: Some(true),
-                base_version: None,
+                percent: 0.2,
+                mutation_id: Some("right".to_string()),
+                base_version: Some(0),
+                ..progress_request_defaults()
+            }),
+        );
+        let (left, right) = tokio::join!(left, right);
+        let statuses = [
+            left.map(|_| StatusCode::OK)
+                .unwrap_or_else(|error| error.into_response().status()),
+            right
+                .map(|_| StatusCode::OK)
+                .unwrap_or_else(|error| error.into_response().status()),
+        ];
+        assert!(statuses.contains(&StatusCode::OK), "statuses: {statuses:?}");
+        assert!(
+            statuses.contains(&StatusCode::CONFLICT),
+            "statuses: {statuses:?}"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn save_progress_missing_book_or_progress_returns_structured_error() {
+        let fixture = TestFixture::new("progress-disappears").await;
+        let missing_book = save_progress(
+            State(fixture.state.clone()),
+            Path(999_999),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                base_version: Some(0),
+                mutation_id: Some("m".to_string()),
+                ..progress_request_defaults()
             }),
         )
         .await
-        .unwrap();
-        assert_eq!(explicit_seek.percent, 0.0005);
+        .unwrap_err();
+        assert_eq!(missing_book.into_response().status(), StatusCode::NOT_FOUND);
+
+        let id = fixture.insert_book("Book", -1.0, None).await;
+        let disappeared_progress = save_progress(
+            State(fixture.state.clone()),
+            Path(id),
+            HeaderMap::new(),
+            Json(SaveProgressRequest {
+                base_version: Some(1),
+                mutation_id: Some("m".to_string()),
+                ..progress_request_defaults()
+            }),
+        )
+        .await
+        .unwrap_err();
+        let response = disappeared_progress.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "progress_conflict");
+        assert!(body["current"].is_null());
 
         fixture.cleanup().await;
+    }
+
+    fn progress_request_defaults() -> SaveProgressRequest {
+        SaveProgressRequest {
+            char_offset: 100,
+            percent: 0.5,
+            locator: None,
+            mutation_id: Some("default".to_string()),
+            position_kind: None,
+            paragraph_fraction: None,
+            source: None,
+            client_id: None,
+            session_id: None,
+            allow_backward: None,
+            base_version: Some(0),
+        }
     }
 
     #[tokio::test]

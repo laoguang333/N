@@ -3,8 +3,10 @@
 所有接口默认以同源 `/api` 开头，响应体为 JSON。错误响应格式：
 
 ```json
-{ "error": "message" }
+{ "error": "message", "code": "optional_code", "current": null }
 ```
+
+阅读进度冲突响应还会在 `current` 中返回服务端当前进度；没有当前记录时为 `null`。
 
 ## GET /api/health
 
@@ -81,6 +83,11 @@
       "book_id": 1,
       "char_offset": 300,
       "percent": 0.35,
+      "locator": null,
+      "version": 4,
+      "mutation_id": "client-mutation-4",
+      "position_kind": "paragraph_utf16_lf_v1",
+      "paragraph_fraction": 0.25,
       "updated_at": "2026-04-29T01:10:00.000Z"
     }
   }
@@ -163,6 +170,11 @@
   "book_id": 1,
   "char_offset": 300,
   "percent": 0.35,
+  "locator": null,
+  "version": 4,
+  "mutation_id": "client-mutation-4",
+  "position_kind": "paragraph_utf16_lf_v1",
+  "paragraph_fraction": 0.25,
   "updated_at": "2026-04-29T01:10:00.000Z"
 }
 ```
@@ -174,16 +186,39 @@
 请求：
 
 ```json
-{ "char_offset": 300, "percent": 0.35 }
+{
+  "char_offset": 300,
+  "percent": 0.35,
+  "base_version": 4,
+  "mutation_id": "client-mutation-5",
+  "position_kind": "paragraph_utf16_lf_v1",
+  "paragraph_fraction": 0.25
+}
 ```
 
 EPUB 进度使用 CFI：
 
 ```json
-{ "char_offset": 0, "percent": 0.35, "locator": "epubcfi(...)" }
+{
+  "char_offset": 0,
+  "percent": 0.35,
+  "locator": "epubcfi(...)",
+  "base_version": 4,
+  "mutation_id": "client-mutation-5"
+}
 ```
 
+`base_version` 与非空 `mutation_id` 是必需字段；缺少任一字段返回 HTTP 428，错误码为
+`progress_protocol_upgrade_required`。`base_version` 必须非负，`mutation_id` 长度为
+1..128 字节。`position_kind` 当前只支持 `paragraph_utf16_lf_v1`；使用该格式时
+`paragraph_fraction` 必须是有限的 `0..1` 数值。非法值返回 400。
+
 `char_offset` 小于 0 时按 0 保存；`percent` 会被限制到 `0..1`，非有限数会返回 400。
+服务端按 `base_version` 做条件更新，旧版本不会覆盖当前进度。相同 `mutation_id` 与完全相同
+载荷的重试返回原确认记录（HTTP 200），不会递增 `version` 或 `updated_at`；相同 mutation
+但载荷不同，或其他版本冲突，返回 HTTP 409、错误码 `progress_conflict`，并带当前记录。
+首次写入使用 `base_version: 0`。旧数据库记录的 `mutation_id`、`position_kind` 和
+`paragraph_fraction` 保持为 `null`，直到新协议写入这些字段。
 
 ## PUT /api/books/{id}/rating
 
