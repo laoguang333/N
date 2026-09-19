@@ -56,12 +56,13 @@ import {
   normalizeProgress,
 } from "./progress";
 import { createProgressSync } from "./progress-sync";
-import { buildChapters, buildParagraphOffsetMap, buildParagraphs, findChapterIndex, findParagraphIndex, formatPercent, formatSize, parseSettings } from "./reader";
+import { buildChapters, buildParagraphOffsetMap, buildParagraphs, findChapterIndex, findParagraphIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings } from "./reader";
 import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 import AutoScroll from "./AutoScroll";
 import FolderOverlay from "./FolderOverlay";
 import EpubReader from "./EpubReader";
 import ChapterDrawer from "./ChapterDrawer";
+import { captureParagraphAnchor } from "./reader-position";
 import { characterRect, createReadingTapHandler, readingTop, readTextPosition } from "./readerPosition";
 import { createRequestScope } from "./request-scope";
 
@@ -221,6 +222,7 @@ export default function App() {
   const pendingSeekValue = useRef<number | null>(null);
   const autoScrollSaveTimer = useRef<number | null>(null);
   const restoreCaptureTimer = useRef<number | null>(null);
+  const searchRevealFrame = useRef<number | null>(null);
   const animeSaveTimer = useRef<number | null>(null);
   const autoScrollProgressUpdatedAt = useRef(0);
   const restoreSavingBlocked = useRef(false);
@@ -253,9 +255,9 @@ export default function App() {
   }, [shelfRatingScope]);
 
   const clearReaderAsyncWork = useCallback(() => {
-    [saveTimer, scrollTimer, progressFrame, seekFrame, autoScrollSaveTimer, restoreCaptureTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
+    [saveTimer, scrollTimer, progressFrame, seekFrame, searchRevealFrame, autoScrollSaveTimer, restoreCaptureTimer, searchDebounceTimer, toastTimer].forEach((timer) => {
       if (timer.current) {
-        if (timer === progressFrame || timer === seekFrame) window.cancelAnimationFrame(timer.current);
+        if (timer === progressFrame || timer === seekFrame || timer === searchRevealFrame) window.cancelAnimationFrame(timer.current);
         else window.clearTimeout(timer.current);
         timer.current = null;
       }
@@ -307,6 +309,27 @@ export default function App() {
     estimateSize: () => 80,
     overscan: 12,
   });
+
+  const searchResultsVirtualizer = useVirtualizer({
+    count: reader.searchResults.length,
+    getScrollElement: () => searchResultsRoot.current,
+    estimateSize: () => 70,
+    overscan: 10,
+    getItemKey: (index) => reader.searchResults[index]?.id || index,
+    enabled: reader.searchOpen && reader.searchResults.length > 0,
+  });
+
+  const queueSearchResultReveal = useCallback((resultId: string) => {
+    if (searchRevealFrame.current !== null) {
+      window.cancelAnimationFrame(searchRevealFrame.current);
+    }
+    searchRevealFrame.current = window.requestAnimationFrame(() => {
+      searchRevealFrame.current = null;
+      const index = readerRef.current.searchResults.findIndex((result: any) => result.id === resultId);
+      if (!readerRef.current.searchOpen || index < 0) return;
+      searchResultsVirtualizer.scrollToIndex(index, { align: "auto" });
+    });
+  }, [searchResultsVirtualizer]);
 
   const themeClass = `theme-${settings.theme}`;
   const libraryHint = shelf.config?.library_dirs?.join(", ") || "novels";
@@ -375,6 +398,30 @@ export default function App() {
     return readTextPosition(el, searchIndex.current?.totalLength || 1)?.percent ?? readerRef.current.visiblePercent;
   }, []);
 
+  const captureReaderAnchor = useCallback(() => {
+    const root = readerRoot.current;
+    const list = root?.firstElementChild;
+    if (!root || !(list instanceof HTMLElement)) return null;
+    const listRect = list.getBoundingClientRect();
+    const renderedItems = Array.from(list.querySelectorAll<HTMLElement>("[data-index]"))
+      .map((row) => {
+        const index = Number(row.dataset.index);
+        const rect = row.getBoundingClientRect();
+        return {
+          index,
+          start: rect.top - listRect.top,
+          end: rect.bottom - listRect.top,
+          size: rect.height,
+        };
+      })
+      .filter((item) => Number.isInteger(item.index) && item.size > 0);
+    return captureParagraphAnchor({
+      paragraphs: readerRef.current.paragraphs,
+      virtualItems: renderedItems.length > 0 ? renderedItems : virtualizer.getVirtualItems(),
+      listOffset: readingTop(root) - listRect.top,
+    });
+  }, [virtualizer]);
+
   const offsetForPercent = useCallback((percent: number) => {
     const safePercent = Math.min(1, Math.max(0, percent));
     if (!searchIndex.current || !paraOffsetMap.current) return 0;
@@ -383,9 +430,10 @@ export default function App() {
   }, []);
 
   const progressPayload = useCallback(() => {
-    return (readerRoot.current && readTextPosition(readerRoot.current, searchIndex.current?.totalLength || 1))
-      || readerRef.current.progress || { char_offset: 0, percent: 0 };
-  }, [currentScrollPercent, offsetForPercent]);
+    const anchor = captureReaderAnchor();
+    if (!anchor) return null;
+    return { ...anchor, percent: currentScrollPercent() };
+  }, [captureReaderAnchor, currentScrollPercent]);
 
   function activeChapterIndex() {
     return findChapterIndex(reader.chapters, offsetForPercent(reader.visiblePercent));
@@ -442,6 +490,7 @@ export default function App() {
     );
     if (!canSaveReaderProgress() && !canCaptureDuringRestore) return null;
     const payload = progressPayload();
+    if (!payload) return currentReader.progress;
     const bookId = currentReader.book.book_id;
     progressSync.observe(bookId, {
       ...payload,
@@ -680,7 +729,12 @@ export default function App() {
     }
   }
 
-  async function navigateToOffset(offset: number, atEnd = false, session: { ticket?: any; bookId?: number } = {}) {
+  async function navigateToOffset(
+    offset: number,
+    atEnd = false,
+    session: { ticket?: any; bookId?: number } = {},
+    anchorProgress: any = null,
+  ) {
     const id = ++navigationId.current;
     const ticket = session.ticket || readerTicketRef.current;
     const bookId = session.bookId || routeRef.current.bookId;
@@ -688,33 +742,47 @@ export default function App() {
     try {
       const index = findParagraphIndex(offset, paraOffsetMap.current);
       const revealParagraph = () => {
-        const estimate = virtualizer.getOffsetForIndex(index, "start");
-        if (estimate && readerRoot.current) readerRoot.current.scrollTop = estimate[0];
+        virtualizer.scrollToIndex(index, { align: "start", behavior: "auto" });
       };
       // We reconcile the exact character ourselves. scrollToIndex would keep
       // reconciling to the paragraph start and undo both this and user scrolling.
       revealParagraph();
       let stableFrames = 0;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      let targetFound = false;
+      const useParagraphAnchor = anchorProgress?.position_kind === "paragraph_utf16_lf_v1"
+        && Number.isFinite(anchorProgress.paragraph_fraction);
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         await afterNextPaint();
         if (id !== navigationId.current || !isCurrentReaderSession(ticket, bookId)) return false;
         const root = readerRoot.current;
         if (!root) return false;
-        const paragraph = root.querySelector<HTMLElement>(`p[data-offset="${readerRef.current.paragraphs[index]?.offset}"]`);
-        if (!paragraph) {
+        const row = root.querySelector<HTMLElement>(`[data-index="${index}"]`);
+        const paragraph = row?.querySelector<HTMLElement>("p[data-offset]");
+        if (!row || !paragraph) {
           revealParagraph();
           continue;
         }
-        const relative = Math.min(Math.max(0, offset - Number(paragraph.dataset.offset)), Math.max(0, (paragraph.textContent?.length || 1) - 1));
-        const rect = characterRect(paragraph, relative) || paragraph.getBoundingClientRect();
-        const delta = atEnd ? root.scrollHeight - root.clientHeight - root.scrollTop : rect.top - readingTop(root);
+        targetFound = true;
+        let delta;
+        if (atEnd) {
+          delta = root.scrollHeight - root.clientHeight - root.scrollTop;
+        } else if (useParagraphAnchor) {
+          const rowRect = row.getBoundingClientRect();
+          const fraction = Math.min(1, Math.max(0, anchorProgress.paragraph_fraction));
+          delta = rowRect.top + fraction * rowRect.height - readingTop(root);
+        } else {
+          const relative = Math.min(Math.max(0, offset - Number(paragraph.dataset.offset)), Math.max(0, (paragraph.textContent?.length || 1) - 1));
+          const rect = characterRect(paragraph, relative) || paragraph.getBoundingClientRect();
+          delta = rect.top - readingTop(root);
+        }
         const before = root.scrollTop;
         root.scrollTop += delta;
-        if (Math.abs(delta) < 1 || Math.abs(root.scrollTop - before) < 1) stableFrames += 1;
+        if (Math.abs(delta) <= 2 || Math.abs(root.scrollTop - before) <= 2) stableFrames += 1;
         else stableFrames = 0;
         if (stableFrames >= 2) break;
       }
       if (id !== navigationId.current || !isCurrentReaderSession(ticket, bookId)) return false;
+      if (!targetFound) return false;
       updateVisibleProgress();
       return true;
     } finally {
@@ -734,7 +802,12 @@ export default function App() {
     const remote = state.confirmed;
     if (!remote) return;
     updateReader({ progress: normalizeProgress(bookId, remote, { dirty: false }), visiblePercent: remote.percent || 0 });
-    void navigateToOffset(remote.char_offset || 0, remote.percent === 1, { ticket: readerTicketRef.current, bookId });
+    void navigateToOffset(
+      remote.char_offset || 0,
+      remote.percent === 1,
+      { ticket: readerTicketRef.current, bookId },
+      remote,
+    );
   }
 
   const openBook = useCallback(async (bookId: number) => {
@@ -812,7 +885,7 @@ export default function App() {
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       const paragraphs = buildParagraphs(content.content);
       const chapters = buildChapters(paragraphs);
-      searchIndex.current = buildSearchIndex(paragraphs);
+      searchIndex.current = buildSearchIndex(paragraphs, normalizeLineEndings(content.content).length);
       paraOffsetMap.current = buildParagraphOffsetMap(paragraphs);
       updateReader({
         book: content,
@@ -827,7 +900,12 @@ export default function App() {
       await afterNextPaint();
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
       const offset = restoredProgress?.char_offset || offsetForPercent(restoredProgress?.percent || 0);
-      const restored = await navigateToOffset(offset, restoredProgress?.percent === 1, { ticket, bookId });
+      const restored = await navigateToOffset(
+        offset,
+        restoredProgress?.percent === 1,
+        { ticket, bookId },
+        restoredProgress,
+      );
       if (!restored || requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId)) return;
     } catch (error) {
       if (requestId !== openRequestId.current || !isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return;
@@ -866,16 +944,21 @@ export default function App() {
   useEffect(() => {
     const current = readerRef.current;
     if (!current.book || current.book.format === "epub" || current.loading || restoreSavingBlocked.current) return;
-    const offset = current.progress?.char_offset || 0;
+    const anchor = captureReaderAnchor();
+    const progress = anchor
+      ? normalizeProgress(current.book.book_id, { ...current.progress, ...anchor }, { dirty: false })
+      : current.progress;
+    if (anchor && progress) updateReader({ progress });
     virtualizer.measure();
-    void navigateToOffset(offset, current.progress?.percent === 1);
-  }, [settings.fontSize, settings.lineHeight, settings.paragraphSpacing]);
+    void navigateToOffset(progress?.char_offset || 0, progress?.percent === 1, {}, progress);
+  }, [captureReaderAnchor, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, virtualizer]);
 
   useEffect(() => {
     function onHashChange() {
       const next = parseRoute();
       const current = routeRef.current;
       if (current.name === "reader" && (!next.bookId || next.bookId !== current.bookId)) {
+        clearReaderAsyncWork();
         saveProgressInBackground("route_change", { reuseCurrent: true });
         invalidateReaderSession();
       }
@@ -889,7 +972,7 @@ export default function App() {
 
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [invalidateReaderSession, saveProgressInBackground, shelf.scrollTop]);
+  }, [clearReaderAsyncWork, invalidateReaderSession, saveProgressInBackground, shelf.scrollTop]);
 
   useEffect(() => {
     loadConfig();
@@ -942,7 +1025,7 @@ export default function App() {
   useEffect(() => {
     function flushProgress(source: any = "flush") {
       if (canSaveReaderProgress()) {
-        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        clearReaderAsyncWork();
         saveProgressInBackground(typeof source === "string" ? source : "flush");
       }
     }
@@ -976,10 +1059,11 @@ export default function App() {
       });
       if (progressFrame.current) window.cancelAnimationFrame(progressFrame.current);
       if (seekFrame.current) window.cancelAnimationFrame(seekFrame.current);
+      if (searchRevealFrame.current) window.cancelAnimationFrame(searchRevealFrame.current);
       if (shelfMeasureFrame.current) window.cancelAnimationFrame(shelfMeasureFrame.current);
       if (animeMeasureFrame.current) window.cancelAnimationFrame(animeMeasureFrame.current);
     };
-  }, [canSaveReaderProgress, saveProgressInBackground, scheduleAnimeMeasure, schedulePeriodicSave, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
+  }, [canSaveReaderProgress, clearReaderAsyncWork, saveProgressInBackground, scheduleAnimeMeasure, schedulePeriodicSave, scheduleProgressSave, scheduleShelfMeasure, snapshotProgress]);
 
   useEffect(() => {
     if (searchDebounceTimer.current) window.clearTimeout(searchDebounceTimer.current);
@@ -1003,6 +1087,13 @@ export default function App() {
       }));
     }, 200);
   }, [reader.searchQuery, reader.paragraphs.length]);
+
+  useEffect(() => {
+    const list = searchResultsRoot.current;
+    if (!reader.searchOpen || !list) return;
+    list.scrollTop = 0;
+    if (reader.activeSearchId) queueSearchResultReveal(reader.activeSearchId);
+  }, [queueSearchResultReveal, reader.activeSearchId, reader.searchOpen, reader.searchQuery, reader.searchResults.length]);
 
   function onReaderScroll() {
     if (!canSaveReaderProgress()) {
@@ -1067,8 +1158,8 @@ export default function App() {
   }
 
   async function goShelf() {
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    await saveProgressNow({ quiet: true, source: "go_shelf" });
+    clearReaderAsyncWork();
+    saveProgressInBackground("go_shelf");
     window.location.hash = "#/";
   }
 
@@ -2084,19 +2175,34 @@ export default function App() {
               {reader.searchQuery && reader.searchResults.length === 0 ? (
                 <p className="search-empty">没有找到匹配内容</p>
               ) : (
-                <div ref={searchResultsRoot} className="search-result-list">
-                  {reader.searchResults.map((result) => (
-                    <button
-                      key={result.id}
-                      data-result-id={result.id}
-                      className={`search-result ${result.id === reader.activeSearchId ? "active" : ""}`}
-                      type="button"
-                      onClick={() => selectSearchResult(result)}
-                    >
-                      <span className="search-result-percent">{Math.round(result.percent * 100)}%</span>
-                      <span className="search-result-text">{result.snippetBefore}<mark>{result.snippetMatch}</mark>{result.snippetAfter}</span>
-                    </button>
-                  ))}
+                <div ref={searchResultsRoot} className="search-result-list" data-result-count={reader.searchResults.length}>
+                  <div style={{ height: `${searchResultsVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
+                    {searchResultsVirtualizer.getVirtualItems().map((virtualResult) => {
+                      const result = reader.searchResults[virtualResult.index];
+                      if (!result) return null;
+                      return (
+                        <button
+                          key={virtualResult.key}
+                          ref={searchResultsVirtualizer.measureElement}
+                          data-index={virtualResult.index}
+                          data-result-id={result.id}
+                          className={`search-result ${result.id === reader.activeSearchId ? "active" : ""}`}
+                          type="button"
+                          onClick={() => selectSearchResult(result)}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            transform: `translateY(${virtualResult.start}px)`,
+                          }}
+                        >
+                          <span className="search-result-percent">{Math.round(result.percent * 100)}%</span>
+                          <span className="search-result-text">{result.snippetBefore}<mark>{result.snippetMatch}</mark>{result.snippetAfter}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </aside>

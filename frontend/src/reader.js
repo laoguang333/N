@@ -36,8 +36,12 @@ export function normalizeSettings(value) {
   };
 }
 
+export function normalizeLineEndings(content) {
+  return String(content ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 export function buildParagraphs(content) {
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalized = normalizeLineEndings(content);
   const lines = normalized.split("\n");
   const paragraphs = [];
   let offset = 0;

@@ -31,6 +31,9 @@ TXT Reader 是一个单机自托管应用，后端负责扫描本地文件、读
 - `char_offset`：前端当前段落偏移。
 - `percent`：滚动进度，范围 `0..1`。
 - `locator`：EPUB CFI 位置，TXT 为空。
+- `version`：服务端乐观并发版本。
+- `mutation_id`：客户端写入身份；同一写入重试可幂等确认，不能跨书复用。
+- `position_kind` / `paragraph_fraction`：TXT 使用 `paragraph_utf16_lf_v1` 段落锚点及段内比例；旧记录为空时走兼容恢复。
 
 ## 扫描流程
 
@@ -50,6 +53,9 @@ TXT Reader 是一个单机自托管应用，后端负责扫描本地文件、读
 - 书架筛选排序直接映射到 `GET /api/shelf` 查询参数。
 - 评分按钮调用 `PUT /api/books/{id}/rating`。
 - 阅读页滚动后防抖保存进度，离开页面时用 `keepalive` 尝试发送最后进度。
+- 阅读器、书架和文件夹请求分别绑定请求世代；迟到响应不能覆盖当前书籍或筛选条件。
+- TXT 先统一 CRLF/CR 为 LF，段落和搜索使用 JavaScript UTF-16 偏移；正文和搜索结果各自使用 TanStack Virtual 虚拟列表。
+- 进度同步按书籍维护 pending/submitted/confirmed 队列。页面离开前先捕获最新可见段落并持久化；Beacon 接受仅表示浏览器已排队，不表示服务端已确认。
 
 TXT 纯逻辑在 `frontend/src/reader.js`：
 

@@ -218,6 +218,13 @@ EPUB 进度使用 CFI：
 载荷的重试返回原确认记录（HTTP 200），不会递增 `version` 或 `updated_at`。`mutation_id`
 是全局写入 ID：不能用于另一本文本、另一位置或另一载荷；违反时返回 HTTP 409、错误码
 `progress_conflict`，并在 `current` 中标识已占用该 ID 的进度记录。
+
+前端会把未确认的最新位置按书籍保存在本地 `pending`/`submitted` 队列中，并在普通保存、
+`keepalive` 或 `sendBeacon` 之间选择可用通道。`sendBeacon` 返回成功只代表浏览器接受了请求，
+不代表服务端已确认；页面关闭时来不及上传的 pending 位置会保留到下次打开后继续同步。
+因此前端不能因为 Beacon 或请求发出就清除 dirty 状态。旧客户端缺少本节新增字段时，后端仍
+返回兼容的空字段；升级后的前端会对缺少 `position_kind` 的旧位置使用百分比兼容恢复，首次
+真实捕获用户位置后才写入新的段落锚点。
 其他版本冲突同样返回 HTTP 409、错误码 `progress_conflict`，并带当前记录。
 首次写入使用 `base_version: 0`。旧数据库记录的 `mutation_id`、`position_kind` 和
 `paragraph_fraction` 保持为 `null`，直到新协议写入这些字段。

@@ -190,8 +190,8 @@ test.describe("reader regressions", () => {
       await page.waitForTimeout(40);
     }
     await expect.poll(() => fixture.progressWrites.some((item) => item.char_offset > 0)).toBeTruthy();
-    await page.waitForTimeout(200);
-    const savedOffset = fixture.progressWrites.filter((item) => item.char_offset > 0).at(-1).char_offset;
+    await page.waitForTimeout(700);
+    const savedOffset = fixture.getStoredProgress().char_offset;
     const savedParagraphOffset = fixture.offsets.reduce(
       (current, offset) => (offset <= savedOffset ? offset : current),
       fixture.offsets[0],

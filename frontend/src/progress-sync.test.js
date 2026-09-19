@@ -33,6 +33,10 @@ function position(charOffset, percent) {
   };
 }
 
+function epubPosition(locator, percent) {
+  return { char_offset: 0, percent, locator };
+}
+
 function createTestSync({ storage = makeStorage(), save = vi.fn(), sendOnExit = vi.fn() } = {}) {
   let counter = 0;
   return {
@@ -214,6 +218,22 @@ test("a position-format change is a real new position", () => {
     char_offset: 160,
     position_kind: "paragraph_utf16_lf_v1",
   }));
+});
+
+test("retains EPUB locators through pending and submitted progress", async () => {
+  const save = vi.fn(async (bookId, payload) => ({
+    book_id: bookId,
+    ...payload,
+    version: 2,
+    updated_at: "2026-09-19T00:00:00.000Z",
+  }));
+  const { sync } = createTestSync({ save });
+  sync.reconcile(17, baseProgress(17, { locator: "epubcfi(/6/2)", char_offset: 0 }));
+  sync.observe(17, epubPosition("epubcfi(/6/4)", 0.4));
+  await sync.flush(17);
+
+  expect(save).toHaveBeenCalledWith(17, expect.objectContaining({ locator: "epubcfi(/6/4)" }));
+  expect(sync.getState(17).confirmed.locator).toBe("epubcfi(/6/4)");
 });
 
 test("storage failure keeps memory state and does not retry unsafe writes in one flush", async () => {

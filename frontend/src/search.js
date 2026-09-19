@@ -4,7 +4,7 @@ function normalizeText(text) {
 
 const SNIPPET_CONTEXT_LENGTH = 35;
 
-export function buildSearchIndex(paragraphs) {
+export function buildSearchIndex(paragraphs, explicitTotalLength) {
   const entries = [];
 
   for (const paragraph of paragraphs || []) {
@@ -22,11 +22,14 @@ export function buildSearchIndex(paragraphs) {
   // Paragraph offsets refer to positions in the original book text. Summing
   // paragraph lengths loses the newlines and blank lines between paragraphs,
   // which makes the search percentage drift from the reader's position.
-  const totalLength = entries.reduce(
+  const inferredTotalLength = entries.reduce(
     (end, entry) => Math.max(end, entry.offset + entry.length),
     0,
   );
 
+  const totalLength = Number.isFinite(explicitTotalLength) && explicitTotalLength >= 0
+    ? explicitTotalLength
+    : inferredTotalLength;
   return { entries, totalLength: Math.max(1, totalLength) };
 }
 

@@ -1,7 +1,20 @@
 import { describe, expect, test } from "vitest";
 import { searchParagraphs, searchWithIndex, buildSearchIndex } from "./search";
+import { buildParagraphs, normalizeLineEndings } from "./reader";
 
 describe("search helpers", () => {
+  test("search percent uses the normalized full text length", () => {
+    const text = "甲\n\n".repeat(100);
+    const paragraphs = buildParagraphs(text);
+    const index = buildSearchIndex(paragraphs, normalizeLineEndings(text).length);
+    const results = searchWithIndex(index, "甲");
+
+    expect(paragraphs.at(-1).offset).toBe(297);
+    expect(index.totalLength).toBe(300);
+    expect(results[34].percent).toBeCloseTo(102 / 300);
+    expect(results.at(-1).percent).toBeCloseTo(297 / 300);
+  });
+
   test("uses original offsets including paragraph separators for total length", () => {
     const paragraphs = [
       { offset: 0, text: "第一段" },

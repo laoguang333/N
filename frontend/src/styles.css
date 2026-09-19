@@ -919,8 +919,8 @@ h1 {
 }
 
 .search-result-list {
-  display: grid;
-  gap: 8px;
+  position: relative;
+  display: block;
   flex: 1 1 auto;
   min-height: 0;
   max-height: 100%;
@@ -935,6 +935,8 @@ h1 {
   gap: 10px;
   align-items: start;
   width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;

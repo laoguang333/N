@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { chooseProgress, isSuspiciousLocalReset, savePayload } from "./progress";
-import { buildChapters, buildParagraphs, findChapterIndex, formatPercent, formatSize, parseSettings } from "./reader";
+import { buildChapters, buildParagraphs, findChapterIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings } from "./reader";
 import { highlightParagraph, searchParagraphs } from "./search";
 
 describe("reader helpers", () => {
@@ -91,6 +91,17 @@ describe("reader helpers", () => {
         { allowBackward: true },
       ),
     ).toBe(false);
+  });
+
+  test("normalizes mixed line endings with UTF-16 offsets", () => {
+    const text = normalizeLineEndings("  甲\r\n\r\n　乙😀\r丙");
+    const paragraphs = buildParagraphs(text);
+    expect(paragraphs).toEqual([
+      { offset: 2, text: "甲" },
+      { offset: 6, text: "乙😀" },
+      { offset: 10, text: "丙" },
+    ]);
+    expect(text.slice(paragraphs[1].offset, paragraphs[1].offset + paragraphs[1].text.length)).toBe("乙😀");
   });
 
   test("detects common TXT chapter headings and finds the active chapter", () => {

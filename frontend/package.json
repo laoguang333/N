@@ -8,8 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run src",
-    "test:e2e": "playwright test e2e/shelf.spec.js",
-    "test:e2e:real": "playwright test e2e/real-progress.spec.js"
+    "test:e2e": "playwright test",
+    "test:e2e:progress": "playwright test e2e/reader-progress.spec.js"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.24",
