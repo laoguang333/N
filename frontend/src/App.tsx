@@ -3,8 +3,13 @@ import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   ArrowLeft,
+  Bookmark,
+  BookmarkCheck,
   BookOpen,
+  CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Film,
   FolderClosed,
   Download,
@@ -14,22 +19,23 @@ import {
   Pause,
   PictureInPicture2,
   Play,
-  Moon,
+  Palette,
   RefreshCw,
   Search,
   Settings,
   Star,
-  Sun,
-  Type,
   X,
 } from "lucide-react";
 import {
   getBookContent,
   bookFileUrl,
+  deleteBookmark,
+  getBookmarks,
   getProgress,
   getBook,
   getPublicConfig,
   getShelf,
+  saveBookmark,
   saveProgress,
   saveProgressBeacon,
   saveProgressKeepalive,
@@ -56,12 +62,15 @@ import {
   normalizeProgress,
 } from "./progress";
 import { createProgressSync } from "./progress-sync";
-import { buildChapters, buildParagraphOffsetMap, buildParagraphs, findChapterIndex, findParagraphIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings } from "./reader";
-import { buildMatchMap, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
+import { buildChapters, buildExcerpt, buildParagraphOffsetMap, buildParagraphs, DEFAULT_SETTINGS, findChapterIndex, findParagraphIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings, tapZone } from "./reader";
+import { buildMatchMap, buildSearchContext, buildSearchIndex, highlightParagraph, searchWithIndex } from "./search";
 import AutoScroll from "./AutoScroll";
 import FolderOverlay from "./FolderOverlay";
 import EpubReader from "./EpubReader";
-import ChapterDrawer from "./ChapterDrawer";
+import ChapterDrawer, { type BookmarkItem, type DrawerTab } from "./ChapterDrawer";
+import ReaderSettingsPanel, { type ReaderSettings } from "./ReaderSettingsPanel";
+import ThemePicker from "./ThemePicker";
+import { contentWidth, fontStack, isDarkTheme, resolveTheme } from "./themes";
 import { captureParagraphAnchor } from "./reader-position";
 import { characterRect, createReadingTapHandler, readingTop, readTextPosition } from "./readerPosition";
 import { createRequestScope } from "./request-scope";
@@ -130,11 +139,52 @@ function animeCodecLabel(video: any) {
   return `${resolution} · ${codec}`;
 }
 
+const COVER_TONES = 8;
+
+function coverTone(title: string) {
+  let hash = 0;
+  for (const char of String(title || "")) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  return hash % COVER_TONES;
+}
+
+function coverGlyph(title: string) {
+  const glyph = Array.from(String(title || "").replace(/^[\s\[\]【】《》()（）「」『』]+/u, ""))[0];
+  return glyph || "书";
+}
+
+function sortBookmarks(bookmarks: BookmarkItem[]) {
+  return bookmarks.slice().sort((a, b) => a.char_offset - b.char_offset || a.percent - b.percent || a.id - b.id);
+}
+
+function formatClock(date: Date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
+function usePrefersDark() {
+  const query = "(prefers-color-scheme: dark)";
+  const [prefersDark, setPrefersDark] = useState(() => Boolean(window.matchMedia?.(query).matches));
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const onChange = (event: MediaQueryListEvent) => setPrefersDark(event.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+  return prefersDark;
+}
+
 export default function App() {
   const clientId = useMemo(loadClientId, []);
   const sessionId = useMemo(createId, []);
   const [route, setRoute] = useState<Route>(() => parseRoute());
-  const [settings, setSettings] = useState(() => parseSettings(localStorage.getItem(STORAGE_KEY)));
+  const [settings, setSettings] = useState<ReaderSettings>(() => parseSettings(localStorage.getItem(STORAGE_KEY)));
+  const prefersDark = usePrefersDark();
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [clock, setClock] = useState(() => new Date());
   const [shelf, setShelf] = useState({
     items: [] as any[],
     continueBook: null as any,
@@ -155,10 +205,15 @@ export default function App() {
     loading: false,
     error: "",
     toast: "",
+    toastTone: "warn" as "warn" | "info",
     book: null as any,
     paragraphs: [] as any[],
     chapters: [] as any[],
     chapterOpen: false,
+    drawerTab: "chapters" as DrawerTab,
+    bookmarks: [] as BookmarkItem[],
+    bookmarksLoaded: false,
+    bookmarksLoading: false,
     searchOpen: false,
     searchQuery: "",
     searchResults: [] as any[],
@@ -204,6 +259,7 @@ export default function App() {
     ratingVideoId: null as number | null,
   });
 
+  const appShellRef = useRef<HTMLElement | null>(null);
   const readerRoot = useRef<HTMLElement | null>(null);
   const animeVideoRef = useRef<HTMLVideoElement | null>(null);
   const searchResultsRoot = useRef<HTMLDivElement | null>(null);
@@ -238,6 +294,9 @@ export default function App() {
   const paraOffsetMap = useRef<any[] | null>(null);
   const matchMap = useRef<Map<number, any[]> | null>(null);
   const readerRef = useRef(reader);
+  const settingsRef = useRef(settings);
+  const readerKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  const bookmarkBusy = useRef(false);
   const routeRef = useRef(route);
   const shelfRef = useRef(shelf);
   const shelfScope = useMemo(() => createRequestScope(), []);
@@ -280,17 +339,33 @@ export default function App() {
   }, [clearReaderAsyncWork, readerScope]);
 
   useEffect(() => { readerRef.current = reader; }, [reader]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { routeRef.current = route; }, [route]);
   useEffect(() => { shelfRef.current = shelf; }, [shelf]);
 
-  const readingTap = useMemo(() => createReadingTapHandler(() => {
+  const readingTap = useMemo(() => createReadingTapHandler((event) => {
     const current = readerRef.current;
     if (current.loading || current.settingsOpen || current.searchOpen || current.chapterOpen) return;
+    if (settingsRef.current.tapPaging && !current.controlsVisible) {
+      const zone = tapZone(event.clientX, window.innerWidth);
+      if (zone !== "center") {
+        pageReader(zone === "next" ? 1 : -1);
+        return;
+      }
+    }
     updateReader((value) => ({ ...value, controlsVisible: !value.controlsVisible }));
   }), []);
 
+  // Sizes are cached per item rather than per index, so a new query never
+  // reuses another row's measured height. Calling measure() instead would drop
+  // the sizes of rows that are already mounted and make them overlap.
   const shelfVirtualizer = useWindowVirtualizer({
     count: shelf.items.length,
+    getItemKey: (index) => {
+      const item = shelf.items[index];
+      if (!item) return index;
+      return item.type === "folder" ? `f-${item.name}` : `b-${item.id}`;
+    },
     estimateSize: () => 86,
     overscan: 8,
     gap: 10,
@@ -300,6 +375,7 @@ export default function App() {
 
   const animeVirtualizer = useWindowVirtualizer({
     count: anime.videos.length,
+    getItemKey: (index) => anime.videos[index]?.id ?? index,
     estimateSize: () => 92,
     overscan: 10,
     gap: 10,
@@ -335,7 +411,8 @@ export default function App() {
     });
   }, [searchResultsVirtualizer]);
 
-  const themeClass = `theme-${settings.theme}`;
+  const resolvedTheme = resolveTheme(settings.theme, prefersDark);
+  const themeClass = `theme-${resolvedTheme}${isDarkTheme(resolvedTheme) ? " is-dark" : ""}`;
   const libraryHint = shelf.config?.library_dirs?.join(", ") || "novels";
   const readerProgressValue = Math.round(reader.visiblePercent * 1000);
   const readerProgressLabel = `${Math.round(reader.visiblePercent * 100)}%`;
@@ -378,6 +455,7 @@ export default function App() {
             ? current.visiblePercent
             : (progress?.percent ?? current.visiblePercent),
           toast: state.error || current.toast,
+          toastTone: state.error ? "warn" : current.toastTone,
         };
       });
       if (progress) {
@@ -526,9 +604,9 @@ export default function App() {
     return progress;
   }, [canSaveReaderProgress, clientId, progressPayload, progressSync, sessionId]);
 
-  function showToast(message: string) {
+  function showToast(message: string, tone: "warn" | "info" = "warn") {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    updateReader({ toast: message });
+    updateReader({ toast: message, toastTone: tone });
     toastTimer.current = window.setTimeout(() => updateReader({ toast: "" }), 4500);
   }
 
@@ -631,9 +709,8 @@ export default function App() {
       setShelfScrollMargin((current) => (
         Math.abs(current - nextScrollMargin) > 0.5 ? nextScrollMargin : current
       ));
-      shelfVirtualizer.measure();
     });
-  }, [shelfVirtualizer]);
+  }, []);
 
   const scheduleAnimeMeasure = useCallback(() => {
     if (routeRef.current.name !== "tab-a") return;
@@ -646,9 +723,8 @@ export default function App() {
       setAnimeScrollMargin((current) => (
         Math.abs(current - nextScrollMargin) > 0.5 ? nextScrollMargin : current
       ));
-      animeVirtualizer.measure();
     });
-  }, [animeVirtualizer]);
+  }, []);
 
   function applyCachedProgress(books: any[]) {
     return books.map((book) => ({
@@ -902,6 +978,10 @@ export default function App() {
       paragraphs: [],
       chapters: [],
       chapterOpen: false,
+      drawerTab: "chapters",
+      bookmarks: [],
+      bookmarksLoaded: false,
+      bookmarksLoading: false,
       progress: null,
       visiblePercent: 0,
       progressSync: null,
@@ -946,6 +1026,7 @@ export default function App() {
             ...current,
             progressSync: progressSync.getState(bookId),
             toast: `进度同步失败: ${(error as Error).message}`,
+            toastTone: "warn",
           }));
         });
       const summary = await getBook(bookId, { signal: ticket.signal });
@@ -1031,8 +1112,46 @@ export default function App() {
       : current.progress;
     if (anchor && progress) updateReader({ progress });
     virtualizer.measure();
+    // measure() resets every size to the estimate. Rows whose height did not
+    // change (e.g. toggling justify) get no resize event, so re-report them
+    // against the fresh estimates.
+    virtualizer.getVirtualItems();
+    readerRoot.current?.querySelectorAll<HTMLElement>("[data-index]").forEach((row) => virtualizer.measureElement(row));
     void navigateToOffset(progress?.char_offset || 0, progress?.percent === 1, {}, progress);
-  }, [captureReaderAnchor, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, virtualizer]);
+  }, [captureReaderAnchor, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, settings.fontFamily, settings.contentWidth, settings.textIndent, settings.justify, virtualizer]);
+
+  useEffect(() => {
+    // Keep the browser chrome and overscroll area in the active skin.
+    const shell = appShellRef.current;
+    if (!shell) return;
+    const background = getComputedStyle(shell).getPropertyValue("--bg").trim();
+    if (!background) return;
+    document.documentElement.style.backgroundColor = background;
+    document.documentElement.style.colorScheme = isDarkTheme(resolvedTheme) ? "dark" : "light";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", background);
+  }, [resolvedTheme]);
+
+  useEffect(() => {
+    if (route.name !== "reader" || !settings.statusBar) return;
+    setClock(new Date());
+    const timer = window.setInterval(() => setClock(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [route.name, settings.statusBar]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => readerKeyHandlerRef.current(event);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target as Element)?.closest?.(".theme-menu, .theme-menu-button")) setThemeMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [themeMenuOpen]);
 
   useEffect(() => {
     function onHashChange() {
@@ -1517,6 +1636,179 @@ export default function App() {
     });
   }
 
+  function stepSearchResult(delta: number) {
+    const current = readerRef.current;
+    const results = current.searchResults;
+    if (results.length === 0) return;
+    const index = results.findIndex((item: any) => item.id === current.activeSearchId);
+    const nextIndex = index < 0
+      ? (delta > 0 ? 0 : results.length - 1)
+      : (index + delta + results.length) % results.length;
+    selectSearchResult(results[nextIndex]);
+  }
+
+  function clearSearch() {
+    matchMap.current = null;
+    updateReader({ searchQuery: "", searchResults: [], activeSearchId: "" });
+  }
+
+  function pageReader(direction: 1 | -1) {
+    const root = readerRoot.current;
+    const current = readerRef.current;
+    if (!root || !current.book || current.book.format === "epub" || current.loading) return;
+    const style = getComputedStyle(root);
+    const lineHeight = parseFloat(style.lineHeight) || settingsRef.current.fontSize * settingsRef.current.lineHeight;
+    // Keep one line of overlap so the reader does not lose their place.
+    const distance = Math.max(lineHeight, root.clientHeight - (parseFloat(style.paddingTop) || 0) - lineHeight);
+    onManualReaderScroll();
+    const reduceMotion = Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+    root.scrollBy({ top: direction * distance, behavior: reduceMotion ? "auto" : "smooth" });
+  }
+
+  async function loadBookmarks() {
+    const current = readerRef.current;
+    const bookId = current.book?.book_id;
+    if (!bookId || current.book.format === "epub") return null;
+    if (current.bookmarksLoaded) return current.bookmarks;
+    const ticket = readerTicketRef.current;
+    updateReader({ bookmarksLoading: true });
+    try {
+      const loaded = await getBookmarks(bookId, { signal: ticket?.signal });
+      if (!isCurrentReaderSession(ticket, bookId)) return null;
+      const bookmarks = sortBookmarks(Array.isArray(loaded) ? loaded : []);
+      updateReader({ bookmarks, bookmarksLoaded: true, bookmarksLoading: false });
+      return bookmarks;
+    } catch (error) {
+      if (!isCurrentReaderSession(ticket, bookId) || isAbortError(error)) return null;
+      updateReader({ bookmarksLoading: false });
+      showToast(`书签加载失败: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  function openDrawer(tab: DrawerTab) {
+    updateReader({ chapterOpen: true, drawerTab: tab, controlsVisible: true, autoScrollPlaying: false });
+    void loadBookmarks();
+  }
+
+  async function removeBookmark(bookmark: BookmarkItem) {
+    const bookId = readerRef.current.book?.book_id;
+    const ticket = readerTicketRef.current;
+    if (!bookId) return;
+    try {
+      await deleteBookmark(bookId, bookmark.id);
+    } catch (error) {
+      if ((error as any)?.status !== 404) {
+        if (isCurrentReaderSession(ticket, bookId)) showToast(`书签删除失败: ${(error as Error).message}`);
+        return;
+      }
+    }
+    if (!isCurrentReaderSession(ticket, bookId)) return;
+    updateReader((value) => ({ ...value, bookmarks: value.bookmarks.filter((item) => item.id !== bookmark.id) }));
+    showToast("已删除书签", "info");
+  }
+
+  async function toggleBookmark() {
+    const current = readerRef.current;
+    const book = current.book;
+    if (!book || book.format === "epub" || current.loading || bookmarkBusy.current) return;
+    bookmarkBusy.current = true;
+    try {
+      // The button removes exactly the bookmark its filled icon is showing.
+      const shown = current.progress
+        ? current.bookmarks.find((item) => item.char_offset === current.progress.char_offset)
+        : undefined;
+      if (shown) {
+        await removeBookmark(shown);
+        return;
+      }
+      const bookId = book.book_id;
+      const ticket = readerTicketRef.current;
+      const anchor = captureReaderAnchor();
+      if (!anchor) return;
+      const percent = currentScrollPercent();
+      const bookmarks = await loadBookmarks();
+      if (!bookmarks || !isCurrentReaderSession(ticket, bookId)) return;
+      if (bookmarks.some((item) => item.char_offset === anchor.char_offset)) {
+        showToast("当前位置已有书签", "info");
+        return;
+      }
+      const paragraphIndex = findParagraphIndex(anchor.char_offset, paraOffsetMap.current);
+      const chapterIndex = findChapterIndex(current.chapters, anchor.char_offset);
+      try {
+        const created = await saveBookmark(bookId, {
+          char_offset: anchor.char_offset,
+          percent,
+          paragraph_fraction: anchor.paragraph_fraction,
+          excerpt: buildExcerpt(current.paragraphs, paragraphIndex),
+          chapter_title: chapterIndex >= 0 ? current.chapters[chapterIndex].title : null,
+        });
+        if (!isCurrentReaderSession(ticket, bookId)) return;
+        updateReader((value) => ({ ...value, bookmarks: sortBookmarks([...value.bookmarks, created]) }));
+        showToast("已添加书签", "info");
+      } catch (error) {
+        if (isCurrentReaderSession(ticket, bookId)) showToast(`书签保存失败: ${(error as Error).message}`);
+      }
+    } finally {
+      bookmarkBusy.current = false;
+    }
+  }
+
+  function selectBookmark(bookmark: BookmarkItem) {
+    updateReader({ chapterOpen: false, controlsVisible: true, autoScrollPlaying: false });
+    const anchorProgress = Number.isFinite(bookmark.paragraph_fraction)
+      ? { position_kind: "paragraph_utf16_lf_v1", paragraph_fraction: bookmark.paragraph_fraction }
+      : null;
+    void navigateToOffset(bookmark.char_offset, false, {}, anchorProgress).then((completed) => {
+      if (completed) {
+        readerMovementPending.current = true;
+        snapshotProgress({ source: "bookmark", allowBackward: true });
+        scheduleProgressSave(250, { source: "bookmark", allowBackward: true });
+      }
+    });
+  }
+
+  readerKeyHandlerRef.current = (event: KeyboardEvent) => {
+    if (routeRef.current.name !== "reader" || event.defaultPrevented || event.isComposing) return;
+    const current = readerRef.current;
+    const key = event.key;
+    if (key === "Escape") {
+      if (current.settingsOpen) updateReader({ settingsOpen: false });
+      else if (current.searchOpen) updateReader({ searchOpen: false });
+      else return;
+      event.preventDefault();
+      return;
+    }
+    if (!current.book || current.book.format === "epub" || current.loading) return;
+    const modifier = event.ctrlKey || event.metaKey;
+    if (modifier && key.toLowerCase() === "f") {
+      event.preventDefault();
+      updateReader({ searchOpen: true, settingsOpen: false, controlsVisible: true, autoScrollPlaying: false });
+      return;
+    }
+    if (key === "F3" || (modifier && key.toLowerCase() === "g")) {
+      if (current.searchResults.length === 0) return;
+      event.preventDefault();
+      stepSearchResult(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (modifier || event.altKey || isEditableTarget(event.target)) return;
+    if (current.chapterOpen || current.settingsOpen || current.searchOpen) return;
+    if (key === "/") {
+      event.preventDefault();
+      updateReader({ searchOpen: true, controlsVisible: true, autoScrollPlaying: false });
+      return;
+    }
+    const onButton = event.target instanceof Element && Boolean(event.target.closest("button"));
+    if (key === "PageDown" || key === "ArrowRight" || (key === " " && !event.shiftKey && !onButton)) {
+      event.preventDefault();
+      pageReader(1);
+    } else if (key === "PageUp" || key === "ArrowLeft" || (key === " " && event.shiftKey && !onButton)) {
+      event.preventDefault();
+      pageReader(-1);
+    }
+  };
+
   function seekProgress(event: React.ChangeEvent<HTMLInputElement>) {
     const value = Number(event.target.value) / 1000;
     pendingSeekValue.current = value;
@@ -1587,14 +1879,30 @@ export default function App() {
     if (readerRef.current.autoScrollPlaying) updateReader({ autoScrollPlaying: false });
   }
 
-  function changeTextSetting(key: "fontSize" | "lineHeight" | "paragraphSpacing", value: number) {
-    setSettings((current) => ({ ...current, [key]: value }));
+  function changeSettings(patch: Partial<ReaderSettings>) {
+    setSettings((current) => ({ ...current, ...patch }));
+  }
+
+  function resetSettings() {
+    setSettings((current) => ({ ...DEFAULT_SETTINGS, theme: current.theme, autoScrollSpeed: current.autoScrollSpeed }));
   }
 
   const shelfVirtualRows = shelfVirtualizer.getVirtualItems().map((virtualRow) => ({
     virtualRow,
     item: shelf.items[virtualRow.index],
   })).filter(({ item }) => Boolean(item));
+
+  const activeSearchIndex = useMemo(
+    () => reader.searchResults.findIndex((item: any) => item.id === reader.activeSearchId),
+    [reader.activeSearchId, reader.searchResults],
+  );
+  const currentBookmark = reader.progress
+    ? reader.bookmarks.find((item) => item.char_offset === reader.progress.char_offset)
+    : undefined;
+  const shelfBookCount = shelf.items.reduce((total, item) => total + (item.type === "folder" ? item.bookCount || 0 : 1), 0);
+  const isTxtReader = Boolean(reader.book) && reader.book.format !== "epub";
+  const chapterOffsets = useMemo(() => new Set(reader.chapters.map((chapter: any) => chapter.offset)), [reader.chapters]);
+  const readerPanelOpen = reader.settingsOpen || reader.searchOpen || reader.chapterOpen;
 
   const animeVirtualRows = animeVirtualizer.getVirtualItems().map((virtualRow) => ({
     virtualRow,
@@ -1667,17 +1975,38 @@ export default function App() {
   }, [route.name]);
 
   return (
-    <main className={`app-shell ${themeClass}`}>
+    <main ref={appShellRef} className={`app-shell ${themeClass}`}>
       {route.name === "shelf" && (
         <section className="shelf-view">
           <header className="shelf-header">
             <div>
               <p className="eyebrow">TXT Reader</p>
               <h1>书架</h1>
+              {shelfBookCount > 0 && <p className="shelf-subtitle">共 {shelfBookCount} 本</p>}
             </div>
-            <button className="icon-button" type="button" disabled={shelf.scanning} onClick={runScan} title="扫描书库">
-              {shelf.scanning ? <LoaderCircle className="spin" size={22} /> : <RefreshCw size={22} />}
-            </button>
+            <div className="toolbar-actions">
+              <div className="theme-menu-anchor">
+                <button
+                  className="icon-button theme-menu-button"
+                  type="button"
+                  onClick={() => setThemeMenuOpen((open) => !open)}
+                  title="切换皮肤"
+                  aria-label="切换皮肤"
+                  aria-expanded={themeMenuOpen}
+                >
+                  <Palette size={22} />
+                </button>
+                {themeMenuOpen && (
+                  <div className="theme-menu" role="dialog" aria-label="切换皮肤">
+                    <strong>皮肤</strong>
+                    <ThemePicker value={settings.theme} onChange={(theme) => changeSettings({ theme })} />
+                  </div>
+                )}
+              </div>
+              <button className="icon-button" type="button" disabled={shelf.scanning} onClick={runScan} title="扫描书库" aria-label="扫描书库">
+                {shelf.scanning ? <LoaderCircle className="spin" size={22} /> : <RefreshCw size={22} />}
+              </button>
+            </div>
           </header>
 
           <div className="search-row">
@@ -1687,6 +2016,7 @@ export default function App() {
 
           {shelf.continueBook && !shelf.search && (
             <button className="continue-card" type="button" onClick={() => openReader(shelf.continueBook.id)}>
+              <span className={`book-cover cover-tone-${coverTone(shelf.continueBook.title)}`} aria-hidden="true">{coverGlyph(shelf.continueBook.title)}</span>
               <span className="continue-copy">
                 <span className="continue-label">继续阅读</span>
                 <strong>{shelf.continueBook.title}</strong>
@@ -1770,11 +2100,14 @@ export default function App() {
                     }
                   }}
                 >
+                  <span className="book-cover folder-cover" aria-hidden="true"><FolderClosed size={22} /></span>
                   <span className="book-main">
-                    <strong><FolderClosed size={18} className="folder-icon" /> {item.name}</strong>
-                    <span>{item.bookCount} 本</span>
+                    <strong>{item.name}</strong>
+                    <span>{item.bookCount} 本{item.maxProgress > 0 ? ` · 最远读到 ${Math.round(item.maxProgress * 100)}%` : ""}</span>
                   </span>
-                  <span className="book-side" />
+                  <span className="book-side">
+                    <ChevronRight size={20} className="folder-chevron" aria-hidden="true" />
+                  </span>
                 </article>
               ) : (
                 <article
@@ -1793,9 +2126,13 @@ export default function App() {
                     }
                   }}
                 >
+                  <span className={`book-cover cover-tone-${coverTone(item.title)}`} aria-hidden="true">{coverGlyph(item.title)}</span>
                   <span className="book-main">
                     <strong>{item.title}</strong>
                     <span>{(item.format || "txt").toUpperCase()} · {formatSize(item.size)} · {item.encoding}</span>
+                    <span className={`book-progress-bar ${item.progress?.percent >= 1 ? "is-finished" : ""}`} aria-hidden="true">
+                      <span style={{ width: `${Math.round(Math.min(1, Math.max(0, item.progress?.percent || 0)) * 100)}%` }} />
+                    </span>
                   </span>
                   <span className="book-side">
                     <span className="book-progress">{formatPercent(item.progress)}</span>
@@ -2043,32 +2380,44 @@ export default function App() {
               {activeChapter() && <span>{activeChapter().title}</span>}
             </div>
             <div className="toolbar-actions">
-              {reader.book?.format !== "epub" && reader.chapters.length > 0 && (
+              {isTxtReader && (
+                <button
+                  className={`icon-button ${currentBookmark ? "is-active" : ""}`}
+                  type="button"
+                  onClick={() => void toggleBookmark()}
+                  title={currentBookmark ? "删除此处书签" : "添加书签"}
+                  aria-label={currentBookmark ? "删除此处书签" : "添加书签"}
+                  aria-pressed={Boolean(currentBookmark)}
+                >
+                  {currentBookmark ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
+                </button>
+              )}
+              {isTxtReader && (
                 <button
                   className="icon-button"
                   type="button"
-                  onClick={() => updateReader({ chapterOpen: true, controlsVisible: true })}
-                  title="目录"
-                  aria-label={`打开目录，共 ${reader.chapters.length} 章`}
+                  onClick={() => openDrawer(reader.chapters.length > 0 ? "chapters" : "bookmarks")}
+                  title="目录与书签"
+                  aria-label={reader.chapters.length > 0 ? `打开目录，共 ${reader.chapters.length} 章` : "打开书签"}
                   aria-expanded={reader.chapterOpen}
                 >
                   <List size={22} />
                 </button>
               )}
-              {reader.book?.format !== "epub" && (
-                <button className="icon-button" type="button" onClick={() => updateReader({ searchOpen: !reader.searchOpen, controlsVisible: true })} title="书内搜索" aria-label="书内搜索">
+              {isTxtReader && (
+                <button className={`icon-button ${reader.searchOpen ? "is-active" : ""}`} type="button" onClick={() => updateReader({ searchOpen: !reader.searchOpen, settingsOpen: false, controlsVisible: true, autoScrollPlaying: false })} title="书内搜索 (Ctrl+F)" aria-label="书内搜索">
                   <Search size={22} />
                 </button>
               )}
-              <button className="icon-button" type="button" onClick={() => updateReader({ settingsOpen: true })} title="阅读设置" aria-label="阅读设置">
+              <button className={`icon-button ${reader.settingsOpen ? "is-active" : ""}`} type="button" onClick={() => updateReader({ settingsOpen: !reader.settingsOpen, searchOpen: false })} title="阅读设置" aria-label="阅读设置">
                 <Settings size={22} />
               </button>
             </div>
           </header>
 
           {reader.toast && (
-            <div className="save-toast" role="alert">
-              <AlertTriangle size={14} />
+            <div className={`save-toast ${reader.toastTone === "info" ? "is-info" : ""}`} role={reader.toastTone === "info" ? "status" : "alert"}>
+              {reader.toastTone === "info" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
               <span>{reader.toast}</span>
             </div>
           )}
@@ -2087,8 +2436,8 @@ export default function App() {
             <EpubReader
               url={bookFileUrl(reader.book.book_id)}
               progress={reader.progress}
-              settings={settings}
-              controlsVisible={reader.controlsVisible}
+              settings={{ ...settings, theme: resolvedTheme }}
+              controlsVisible={reader.controlsVisible && !reader.settingsOpen}
               autoScrollPlaying={reader.autoScrollPlaying}
               autoScrollSpeed={settings.autoScrollSpeed}
               interactionBlocked={reader.settingsOpen || reader.searchOpen}
@@ -2102,10 +2451,17 @@ export default function App() {
           {reader.book && reader.book.format !== "epub" && (
             <article
               ref={readerRoot}
-              className={`reader-content ${reader.loading ? "is-restoring" : ""}`}
+              className={[
+                "reader-content",
+                reader.loading ? "is-restoring" : "",
+                settings.textIndent ? "has-indent" : "",
+                settings.justify ? "is-justified" : "",
+              ].filter(Boolean).join(" ")}
               style={{
                 "--reader-font-size": `${settings.fontSize}px`,
                 "--reader-line-height": settings.lineHeight,
+                "--reader-font-family": fontStack(settings.fontFamily),
+                "--reader-width": contentWidth(settings.contentWidth),
               } as React.CSSProperties}
               onPointerDown={(event) => readingTap.pointerdown(event.nativeEvent)}
               onPointerMove={(event) => readingTap.pointermove(event.nativeEvent)}
@@ -2136,7 +2492,10 @@ export default function App() {
                     >
                       <p
                         data-offset={paragraph.offset}
-                        className={matches.some((item) => item.id === reader.activeSearchId) ? "is-match-target" : ""}
+                        className={[
+                          matches.some((item) => item.id === reader.activeSearchId) ? "is-match-target" : "",
+                          chapterOffsets.has(paragraph.offset) ? "is-chapter-title" : "",
+                        ].filter(Boolean).join(" ") || undefined}
                       >
                         {highlightParagraph(paragraph.text, matches, reader.activeSearchId).map((part: any, index: number) => (
                           part.highlight
@@ -2173,11 +2532,30 @@ export default function App() {
             </div>
           )}
 
+          {isTxtReader && !reader.loading && settings.statusBar && (
+            <div className={`reader-status ${reader.controlsVisible || reader.progressSeeking ? "is-hidden" : ""}`} aria-hidden="true">
+              <span className="reader-status-chapter">{activeChapter()?.title || reader.book.title}</span>
+              <span className="reader-status-meta">{readerProgressLabel} · {formatClock(clock)}</span>
+            </div>
+          )}
+
+          {isTxtReader && !readerPanelOpen && reader.controlsVisible && reader.searchQuery.trim() && reader.searchResults.length > 0 && (
+            <div className="search-nav" role="toolbar" aria-label="搜索结果导航">
+              <Search size={15} aria-hidden="true" />
+              <span className="search-nav-query" title={reader.searchQuery}>{reader.searchQuery}</span>
+              <span className="search-nav-count">{activeSearchIndex >= 0 ? activeSearchIndex + 1 : "-"} / {reader.searchResults.length}</span>
+              <button type="button" onClick={() => stepSearchResult(-1)} aria-label="上一个搜索结果" title="上一个 (Shift+F3)"><ChevronUp size={18} /></button>
+              <button type="button" onClick={() => stepSearchResult(1)} aria-label="下一个搜索结果" title="下一个 (F3)"><ChevronDown size={18} /></button>
+              <button type="button" onClick={() => updateReader({ searchOpen: true, settingsOpen: false })} aria-label="查看全部搜索结果" title="全部结果"><List size={16} /></button>
+              <button type="button" onClick={clearSearch} aria-label="结束搜索" title="结束搜索"><X size={16} /></button>
+            </div>
+          )}
+
           {reader.book?.format !== "epub" && (
             <AutoScroll
               playing={reader.autoScrollPlaying}
               speed={settings.autoScrollSpeed}
-              controlsVisible={reader.controlsVisible}
+              controlsVisible={reader.controlsVisible && !readerPanelOpen}
               scrollElement={readerRoot.current}
               onPlayingChange={(autoScrollPlaying) => updateReader({ autoScrollPlaying })}
               onSpeedChange={(autoScrollSpeed) => setSettings((current) => ({ ...current, autoScrollSpeed }))}
@@ -2185,84 +2563,91 @@ export default function App() {
           )}
 
           {reader.settingsOpen && (
-            <aside className="settings-panel">
-              <div className="settings-header">
-                <strong>阅读设置</strong>
-                <button className="icon-button" type="button" onClick={() => updateReader({ settingsOpen: false })} title="关闭">
-                  <X size={20} />
-                </button>
-              </div>
-              <label className="control-row">
-                <span><Type size={18} /> 字号</span>
-                <input value={settings.fontSize} onChange={(event) => changeTextSetting("fontSize", Number(event.target.value))} type="range" min="16" max="32" step="1" />
-                <b>{settings.fontSize}</b>
-              </label>
-              <label className="control-row">
-                <span>行距</span>
-                <input value={settings.lineHeight} onChange={(event) => changeTextSetting("lineHeight", Number(event.target.value))} type="range" min="1.4" max="2.4" step="0.05" />
-                <b>{settings.lineHeight.toFixed(2)}</b>
-              </label>
-              <label className="control-row">
-                <span>段距</span>
-                <input value={settings.paragraphSpacing} onChange={(event) => changeTextSetting("paragraphSpacing", Number(event.target.value))} type="range" min="4" max="36" step="2" />
-                <b>{settings.paragraphSpacing}</b>
-              </label>
-              <div className="theme-row">
-                <button type="button" className={settings.theme === "paper" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "paper" }))}>
-                  <Sun size={18} /> 纸色
-                </button>
-                <button type="button" className={settings.theme === "night" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "night" }))}>
-                  <Moon size={18} /> 夜间
-                </button>
-              </div>
-            </aside>
+            <ReaderSettingsPanel
+              settings={settings}
+              isEpub={reader.book?.format === "epub"}
+              onChange={changeSettings}
+              onReset={resetSettings}
+              onClose={() => updateReader({ settingsOpen: false })}
+            />
           )}
 
           {reader.searchOpen && reader.book?.format !== "epub" && (
-            <aside className="search-panel">
+            <aside className="search-panel" aria-label="书内搜索">
               <div className="search-panel-header">
                 <strong>书内搜索</strong>
+                {reader.searchQuery.trim() && reader.searchResults.length > 0 && (
+                  <span className="search-count">
+                    {activeSearchIndex >= 0 ? `${activeSearchIndex + 1} / ` : ""}{reader.searchResults.length} 处
+                  </span>
+                )}
                 <button className="icon-button" type="button" onClick={() => updateReader({ searchOpen: false })} title="关闭搜索" aria-label="关闭搜索">
                   <X size={20} />
                 </button>
               </div>
               <label className="search-input">
                 <Search size={18} />
-                <input value={reader.searchQuery} onChange={(event) => updateReader({ searchQuery: event.target.value })} type="search" placeholder="输入书中关键词" aria-label="书内关键词" />
+                <input
+                  value={reader.searchQuery}
+                  onChange={(event) => updateReader({ searchQuery: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                    event.preventDefault();
+                    const results = readerRef.current.searchResults;
+                    const target = results.find((item: any) => item.id === readerRef.current.activeSearchId) || results[0];
+                    if (target) selectSearchResult(target);
+                  }}
+                  type="search"
+                  placeholder="输入书中关键词"
+                  aria-label="书内关键词"
+                  autoFocus
+                />
               </label>
-              {reader.searchQuery && reader.searchResults.length === 0 ? (
+              {!reader.searchQuery.trim() ? (
+                <p className="search-empty">输入关键词后，每条结果都会显示所在章节和前后文。回车跳到选中结果，F3 / Shift+F3 切换上下一处。</p>
+              ) : reader.searchResults.length === 0 ? (
                 <p className="search-empty">没有找到匹配内容</p>
-              ) : (
-                <div ref={searchResultsRoot} className="search-result-list" data-result-count={reader.searchResults.length}>
-                  <div style={{ height: `${searchResultsVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
-                    {searchResultsVirtualizer.getVirtualItems().map((virtualResult) => {
-                      const result = reader.searchResults[virtualResult.index];
-                      if (!result) return null;
-                      return (
-                        <button
-                          key={virtualResult.key}
-                          ref={searchResultsVirtualizer.measureElement}
-                          data-index={virtualResult.index}
-                          data-result-id={result.id}
-                          className={`search-result ${result.id === reader.activeSearchId ? "active" : ""}`}
-                          type="button"
-                          onClick={() => selectSearchResult(result)}
-                          style={{
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            width: "100%",
-                            transform: `translateY(${virtualResult.start}px)`,
-                          }}
-                        >
-                          <span className="search-result-percent">{Math.round(result.percent * 100)}%</span>
-                          <span className="search-result-text">{result.snippetBefore}<mark>{result.snippetMatch}</mark>{result.snippetAfter}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+              ) : null}
+              <div ref={searchResultsRoot} className="search-result-list" data-result-count={reader.searchResults.length}>
+                <div style={{ height: `${searchResultsVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
+                  {searchResultsVirtualizer.getVirtualItems().map((virtualResult) => {
+                    const result = reader.searchResults[virtualResult.index];
+                    if (!result) return null;
+                    const context = buildSearchContext(searchIndex.current, result);
+                    const chapterIndex = findChapterIndex(reader.chapters, result.offset);
+                    return (
+                      <button
+                        key={virtualResult.key}
+                        ref={searchResultsVirtualizer.measureElement}
+                        data-index={virtualResult.index}
+                        data-result-id={result.id}
+                        className={`search-result ${result.id === reader.activeSearchId ? "active" : ""}`}
+                        type="button"
+                        onClick={() => selectSearchResult(result)}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualResult.start}px)`,
+                        }}
+                      >
+                        <span className="search-result-meta">
+                          <span className="search-result-chapter">{chapterIndex >= 0 ? reader.chapters[chapterIndex].title : "正文"}</span>
+                          <span className="search-result-percent">#{virtualResult.index + 1} · {Math.round(result.percent * 100)}%</span>
+                        </span>
+                        <span className="search-result-text">
+                          {context.clippedStart && <span className="search-ellipsis">…</span>}
+                          {context.before}
+                          <mark>{context.match}</mark>
+                          {context.after}
+                          {context.clippedEnd && <span className="search-ellipsis">…</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-              )}
+              </div>
             </aside>
           )}
 
@@ -2270,8 +2655,14 @@ export default function App() {
             <ChapterDrawer
               chapters={reader.chapters}
               activeIndex={activeChapterIndex()}
+              bookmarks={reader.bookmarks}
+              bookmarksLoading={reader.bookmarksLoading}
+              tab={reader.drawerTab}
+              onTabChange={(drawerTab) => updateReader({ drawerTab })}
               onClose={() => updateReader({ chapterOpen: false })}
               onSelect={selectChapter}
+              onSelectBookmark={selectBookmark}
+              onDeleteBookmark={(bookmark) => void removeBookmark(bookmark)}
             />
           )}
         </section>

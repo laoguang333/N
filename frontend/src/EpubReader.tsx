@@ -9,6 +9,7 @@ import {
   type EpubTocItem,
 } from "./epub";
 import { createReadingTapHandler } from "./readerPosition";
+import { fontStack } from "./themes";
 
 type EpubReaderProps = {
   url: string;
@@ -17,6 +18,7 @@ type EpubReaderProps = {
     fontSize: number;
     lineHeight: number;
     theme: string;
+    fontFamily?: string;
   };
   controlsVisible: boolean;
   autoScrollPlaying: boolean;
@@ -27,6 +29,39 @@ type EpubReaderProps = {
   onAutoScrollSpeedChange: (speed: number) => void;
   onProgress: (progress: { percent: number; locator: string | null }) => void;
 };
+
+// The reader skin is defined by CSS variables on the surrounding app shell;
+// copy the resolved colors into the EPUB iframe so both always match.
+function applyReaderTheme(rendition: any, host: HTMLElement | null, settings: EpubReaderProps["settings"]) {
+  const style = host ? getComputedStyle(host) : null;
+  const read = (name: string, fallback: string) => style?.getPropertyValue(name).trim() || fallback;
+  const body: Record<string, string> = {
+    color: read("--text", "#29251f"),
+    background: read("--bg", "#f8f1e5"),
+    margin: "0 auto !important",
+    padding: "20px 20px 64px !important",
+    "box-sizing": "border-box !important",
+    "max-width": "760px !important",
+    "line-height": `${settings.lineHeight} !important`,
+  };
+  if (settings.fontFamily && settings.fontFamily !== "system") {
+    body["font-family"] = `${fontStack(settings.fontFamily)} !important`;
+  }
+  rendition.themes.register("reader", {
+    body,
+    "p, div, li": {
+      "line-height": `${settings.lineHeight} !important`,
+    },
+    a: {
+      color: read("--accent", "#2e7d69"),
+    },
+    "::selection": {
+      background: `color-mix(in srgb, ${read("--accent", "#2e7d69")} 30%, transparent)`,
+    },
+  });
+  rendition.themes.select("reader");
+  rendition.themes.fontSize(`${settings.fontSize}px`);
+}
 
 type EpubTocItemsProps = {
   items: EpubTocItem[];
@@ -141,42 +176,7 @@ export default function EpubReader({
       contents.document.addEventListener("touchmove", stopAutoScroll, { passive: true });
     });
 
-    rendition.themes.register("paper", {
-      body: {
-        color: "#29251f",
-        background: "#f8f1e5",
-        margin: "0 auto !important",
-        padding: "20px 20px 64px !important",
-        "box-sizing": "border-box !important",
-        "max-width": "760px !important",
-        "line-height": `${settings.lineHeight} !important`,
-      },
-      "p, div, li": {
-        "line-height": `${settings.lineHeight} !important`,
-      },
-      "::selection": {
-        background: "#d9c7a3",
-      },
-    });
-    rendition.themes.register("night", {
-      body: {
-        color: "#e8e1d5",
-        background: "#141312",
-        margin: "0 auto !important",
-        padding: "20px 20px 64px !important",
-        "box-sizing": "border-box !important",
-        "max-width": "760px !important",
-        "line-height": `${settings.lineHeight} !important`,
-      },
-      "p, div, li": {
-        "line-height": `${settings.lineHeight} !important`,
-      },
-      "::selection": {
-        background: "#574d3f",
-      },
-    });
-    rendition.themes.select(settings.theme === "night" ? "night" : "paper");
-    rendition.themes.fontSize(`${settings.fontSize}px`);
+    applyReaderTheme(rendition, root, settings);
 
     function reportProgress(location: any) {
       const nextProgress = epubProgressFromLocation(book.locations, location);
@@ -222,10 +222,9 @@ export default function EpubReader({
   useEffect(() => {
     const rendition = renditionRef.current;
     if (!rendition) return;
-    rendition.themes.select(settings.theme === "night" ? "night" : "paper");
-    rendition.themes.fontSize(`${settings.fontSize}px`);
+    applyReaderTheme(rendition, rootRef.current, settings);
     rendition.themes.override("line-height", `${settings.lineHeight}`, true);
-  }, [settings.fontSize, settings.lineHeight, settings.theme]);
+  }, [settings.fontFamily, settings.fontSize, settings.lineHeight, settings.theme]);
 
   function displayHref(href: string) {
     const rendition = renditionRef.current;

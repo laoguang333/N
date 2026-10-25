@@ -35,6 +35,12 @@ TXT Reader 是一个单机自托管应用，后端负责扫描本地文件、读
 - `mutation_id`：客户端写入身份；同一写入重试可幂等确认，不能跨书复用。
 - `position_kind` / `paragraph_fraction`：TXT 使用 `paragraph_utf16_lf_v1` 段落锚点及段内比例；旧记录为空时走兼容恢复。
 
+`bookmarks` 保存书签：
+
+- `book_id`：对应 `books.id`，级联删除。
+- `char_offset` / `paragraph_fraction`：与阅读进度相同的段落锚点，用于跳回书签位置。
+- `percent`、`excerpt`、`chapter_title`：列表展示用的位置、摘录和章节名。
+
 ## 扫描流程
 
 1. 确保 `library_dirs` 中的目录存在。
@@ -62,6 +68,13 @@ TXT 纯逻辑在 `frontend/src/reader.js`：
 - 阅读设置解析和边界限制。
 - TXT 段落拆分。
 - 书架尺寸和进度标签格式化。
+- 书签摘录和点击翻页区域判定。
+
+书内搜索在 `frontend/src/search.js`：`searchWithIndex` 返回命中列表，`buildSearchContext` 只为可见的虚拟行生成上下文，可跨越段落边界（默认前 40、后 64 个字符，最多前后各 2 段），所以短对话行也能看到前后文。阅读页在关闭搜索面板后显示搜索导航条，可用按钮或 F3 / Shift+F3 在命中间切换。
+
+皮肤在 `frontend/src/themes.ts` 中登记，颜色只在 `styles.css` 的 `.theme-{id}` 变量集中定义；`auto` 按 `prefers-color-scheme` 选择纸色或夜间。EPUB 阅读器从外壳读取解析后的 CSS 变量注入 iframe，因此和 TXT 使用同一套皮肤。
+
+阅读设置面板在 `frontend/src/ReaderSettingsPanel.tsx`，包括皮肤、字号、行距、段距、字体、版心宽度、首行缩进、两端对齐、点击翻页和底部状态栏。目录抽屉 `ChapterDrawer.tsx` 同时提供目录和书签两个标签页；书签在首次打开抽屉或点击书签按钮时才请求。
 
 EPUB 阅读在 `frontend/src/EpubReader.tsx`：
 
@@ -74,6 +87,7 @@ React 迁移后的辅助组件：
 
 - `frontend/src/FolderOverlay.tsx`：文件夹分组弹层、分页和评分。
 - `frontend/src/AutoScroll.tsx`：阅读页自动滚屏和速度拨盘。
+- `frontend/src/ThemePicker.tsx`：书架和阅读设置共用的皮肤选择器。
 
 ## 开发脚本
 

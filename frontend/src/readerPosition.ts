@@ -41,7 +41,7 @@ export function readTextPosition(root: HTMLElement, totalLength: number) {
   return { char_offset: offset, percent: atEnd ? 1 : Math.min(1, offset / Math.max(1, totalLength)) };
 }
 
-export function createReadingTapHandler(onTap: () => void) {
+export function createReadingTapHandler(onTap: (event: MouseEvent) => void) {
   let start: { x: number; y: number; moved: boolean } | null = null;
   return {
     pointerdown(event: PointerEvent) {
@@ -54,7 +54,7 @@ export function createReadingTapHandler(onTap: () => void) {
     click(event: MouseEvent) {
       const selection = (event.target as Node)?.ownerDocument?.getSelection();
       const interactive = (event.target as Element)?.closest?.("a, button, input, select, textarea, [contenteditable=true]");
-      if (start && !start.moved && !selection?.toString() && !interactive) onTap();
+      if (start && !start.moved && !selection?.toString() && !interactive) onTap(event);
       start = null;
     },
   };

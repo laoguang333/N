@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { searchParagraphs, searchWithIndex, buildSearchIndex } from "./search";
+import { buildSearchContext, searchParagraphs, searchWithIndex, buildSearchIndex } from "./search";
 import { buildParagraphs, normalizeLineEndings } from "./reader";
 
 describe("search helpers", () => {
@@ -72,5 +72,63 @@ describe("search helpers", () => {
       snippetMatch: "target",
       snippetAfter: " suffix",
     });
+  });
+
+  test("context crosses paragraph boundaries for short dialogue lines", () => {
+    const paragraphs = buildParagraphs("他推开门，看见老人坐在窗边。\n“好。”\n老人点了点头，转身走向书架。");
+    const index = buildSearchIndex(paragraphs);
+    const [result] = searchWithIndex(index, "好");
+
+    expect(result.snippetBefore).toBe("“");
+    expect(buildSearchContext(index, result)).toEqual({
+      before: "他推开门，看见老人坐在窗边。\n“",
+      match: "好",
+      after: "。”\n老人点了点头，转身走向书架。",
+      clippedStart: false,
+      clippedEnd: false,
+    });
+  });
+
+  test("context stops at the length budget and reports clipping", () => {
+    const paragraphs = [
+      { offset: 0, text: "一".repeat(50) },
+      { offset: 51, text: "前文命中后文" },
+      { offset: 58, text: "二".repeat(50) },
+    ];
+    const index = buildSearchIndex(paragraphs);
+    const [result] = searchWithIndex(index, "命中");
+    const context = buildSearchContext(index, result, { before: 10, after: 12 });
+
+    expect(context).toEqual({
+      before: `${"一".repeat(8)}\n前文`,
+      match: "命中",
+      after: `后文\n${"二".repeat(10)}`,
+      clippedStart: true,
+      clippedEnd: true,
+    });
+  });
+
+  test("context crosses at most the configured number of paragraphs", () => {
+    const paragraphs = buildParagraphs(["甲", "乙", "丙", "丁", "目标", "戊", "己", "庚", "辛"].join("\n"));
+    const index = buildSearchIndex(paragraphs);
+    const [result] = searchWithIndex(index, "目标");
+    const context = buildSearchContext(index, result, { maxParagraphs: 2 });
+
+    expect(context.before).toBe("丙\n丁\n");
+    expect(context.after).toBe("\n戊\n己");
+    expect(context.clippedStart).toBe(true);
+    expect(context.clippedEnd).toBe(true);
+  });
+
+  test("context never splits surrogate pairs", () => {
+    const text = `${"😀".repeat(30)}目标${"😀".repeat(30)}`;
+    const index = buildSearchIndex([{ offset: 0, text }]);
+    const [result] = searchWithIndex(index, "目标");
+    const context = buildSearchContext(index, result, { before: 7, after: 7 });
+
+    expect(context.before).toBe("😀".repeat(3));
+    expect(context.after).toBe("😀".repeat(3));
+    expect(context.clippedStart).toBe(true);
+    expect(context.clippedEnd).toBe(true);
   });
 });
