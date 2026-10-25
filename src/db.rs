@@ -198,6 +198,30 @@ pub async fn migrate(db: &SqlitePool) -> anyhow::Result<()> {
 
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            char_offset INTEGER NOT NULL,
+            percent REAL NOT NULL,
+            paragraph_fraction REAL,
+            excerpt TEXT NOT NULL DEFAULT '',
+            chapter_title TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id, char_offset);",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS anime_videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
