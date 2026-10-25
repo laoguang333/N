@@ -1,10 +1,13 @@
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  deleteBookmark,
   getBook,
+  getBookmarks,
   getBookContent,
   getProgress,
   getShelf,
   listBooks,
+  saveBookmark,
   saveProgress,
   saveProgressKeepalive,
 } from "./api";
@@ -78,4 +81,21 @@ test("normal progress save channels carry the same versioned JSON payload", asyn
   await saveProgressKeepalive(7, payload);
 
   expect(fetchMock.mock.calls.slice(-2).map(([, options]) => JSON.parse(options.body))).toEqual([payload, payload]);
+});
+
+test("bookmark APIs use the book-scoped endpoints", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([]));
+  const bookmark = { char_offset: 12, percent: 0.5, paragraph_fraction: 0.25, excerpt: "摘录", chapter_title: "第一章" };
+
+  await getBookmarks(3);
+  await saveBookmark(3, bookmark);
+  await deleteBookmark(3, 9);
+
+  expect(fetchMock.mock.calls[0][0]).toBe("/api/books/3/bookmarks");
+  expect(fetchMock.mock.calls[1]).toEqual(["/api/books/3/bookmarks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(bookmark),
+  }]);
+  expect(fetchMock.mock.calls[2]).toEqual(["/api/books/3/bookmarks/9", { method: "DELETE" }]);
 });

@@ -130,6 +130,22 @@ export function saveRating(id, rating) {
   });
 }
 
+export function getBookmarks(bookId, options = {}) {
+  return request(`/api/books/${bookId}/bookmarks`, options);
+}
+
+export function saveBookmark(bookId, bookmark) {
+  return request(`/api/books/${bookId}/bookmarks`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(bookmark),
+  });
+}
+
+export function deleteBookmark(bookId, bookmarkId) {
+  return request(`/api/books/${bookId}/bookmarks/${bookmarkId}`, { method: "DELETE" });
+}
+
 export function animeTranscodeUrl(path) {
   const params = new URLSearchParams({ path });
   return `/api/anime/transcode?${params}`;

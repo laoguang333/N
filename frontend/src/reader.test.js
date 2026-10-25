@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { chooseProgress, isSuspiciousLocalReset, savePayload } from "./progress";
-import { buildChapters, buildParagraphs, findChapterIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings } from "./reader";
+import { buildChapters, buildExcerpt, buildParagraphs, findChapterIndex, formatPercent, formatSize, normalizeLineEndings, parseSettings, tapZone } from "./reader";
 import { highlightParagraph, searchParagraphs } from "./search";
 
 describe("reader helpers", () => {
@@ -29,6 +29,40 @@ describe("reader helpers", () => {
       paragraphSpacing: 16,
       theme: "paper",
       autoScrollSpeed: 5,
+      fontFamily: "system",
+      contentWidth: "medium",
+      textIndent: true,
+      justify: true,
+      tapPaging: false,
+      statusBar: true,
+    });
+  });
+
+  test("parseSettings keeps known skins and layout options", () => {
+    const settings = parseSettings(JSON.stringify({
+      theme: "midnight",
+      fontFamily: "kai",
+      contentWidth: "wide",
+      textIndent: false,
+      justify: false,
+      tapPaging: true,
+      statusBar: false,
+    }));
+    expect(settings).toMatchObject({
+      theme: "midnight",
+      fontFamily: "kai",
+      contentWidth: "wide",
+      textIndent: false,
+      justify: false,
+      tapPaging: true,
+      statusBar: false,
+    });
+    expect(parseSettings(JSON.stringify({ theme: "auto" })).theme).toBe("auto");
+    expect(parseSettings(JSON.stringify({ theme: "night" })).theme).toBe("night");
+    expect(parseSettings(JSON.stringify({ fontFamily: "comic", contentWidth: 3, tapPaging: "yes" }))).toMatchObject({
+      fontFamily: "system",
+      contentWidth: "medium",
+      tapPaging: false,
     });
   });
 
@@ -185,5 +219,20 @@ describe("reader helpers", () => {
     expect(parseSettings(JSON.stringify({ autoScrollSpeed: 2 })).autoScrollSpeed).toBe(2);
     expect(parseSettings(JSON.stringify({ autoScrollSpeed: 100 })).autoScrollSpeed).toBe(10);
     expect(parseSettings(JSON.stringify({ autoScrollSpeed: null })).autoScrollSpeed).toBe(5);
+  });
+
+  test("buildExcerpt joins short paragraphs and limits length", () => {
+    const paragraphs = [{ text: "开头" }, { text: "“好。”" }, { text: "他点了点头。" }, { text: "第四段" }, { text: "第五段" }];
+    expect(buildExcerpt(paragraphs, 1)).toBe("“好。” 他点了点头。 第四段");
+    expect(buildExcerpt([{ text: "长".repeat(200) }], 0)).toBe("长".repeat(80));
+    expect(buildExcerpt([{ text: "😀".repeat(100) }], 0, 5)).toBe("😀".repeat(5));
+    expect(buildExcerpt([], 3)).toBe("");
+  });
+
+  test("tapZone splits the screen into previous, center and next", () => {
+    expect(tapZone(10, 400)).toBe("previous");
+    expect(tapZone(200, 400)).toBe("center");
+    expect(tapZone(390, 400)).toBe("next");
+    expect(tapZone(Number.NaN, 400)).toBe("center");
   });
 });

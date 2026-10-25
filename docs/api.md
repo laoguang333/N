@@ -246,3 +246,48 @@ EPUB 进度使用 CFI：
 ```
 
 评分必须是 `1..5`，否则返回 400。响应为更新后的 `BookSummary`。
+
+## GET /api/books/{id}/bookmarks
+
+返回该书的书签，按 `char_offset` 升序排列。书籍不存在时返回 404。
+
+```json
+[
+  {
+    "id": 3,
+    "book_id": 1,
+    "char_offset": 300,
+    "percent": 0.35,
+    "paragraph_fraction": 0.25,
+    "excerpt": "他推开门，看见老人坐在窗边。",
+    "chapter_title": "第一章 开端",
+    "created_at": "2026-10-25T08:30:00.000Z"
+  }
+]
+```
+
+## POST /api/books/{id}/bookmarks
+
+新增书签。`char_offset` 与进度相同，是规范化 LF 文本中段落起点的 UTF-16 偏移；
+`paragraph_fraction` 为段内比例，用于精确回到段落中的位置。
+
+请求：
+
+```json
+{
+  "char_offset": 300,
+  "percent": 0.35,
+  "paragraph_fraction": 0.25,
+  "excerpt": "他推开门，看见老人坐在窗边。",
+  "chapter_title": "第一章 开端"
+}
+```
+
+`char_offset` 不能为负；`percent` 与 `paragraph_fraction` 必须是有限的 `0..1` 数值，否则返回 400。
+`excerpt` 去除首尾空白后最多保留 120 个字符，`chapter_title` 最多 60 个字符，空标题保存为 `null`。
+响应为新建的书签。书签随书籍记录级联删除。
+
+## DELETE /api/books/{id}/bookmarks/{bookmark_id}
+
+删除书签，成功返回 `{ "ok": true }`。书签不存在或不属于该书时返回 404。
+

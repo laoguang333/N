@@ -1,9 +1,17 @@
+import { FONT_OPTIONS, WIDTH_OPTIONS, isThemeSetting } from "./themes";
+
 export const DEFAULT_SETTINGS = {
   fontSize: 20,
   lineHeight: 1.85,
   paragraphSpacing: 16,
   theme: "paper",
   autoScrollSpeed: 5,
+  fontFamily: "system",
+  contentWidth: "medium",
+  textIndent: true,
+  justify: true,
+  tapPaging: false,
+  statusBar: true,
 };
 
 export function parseSettings(raw) {
@@ -31,9 +39,23 @@ export function normalizeSettings(value) {
       36,
       DEFAULT_SETTINGS.paragraphSpacing,
     ),
-    theme: settings.theme === "night" ? "night" : "paper",
+    theme: isThemeSetting(settings.theme) ? settings.theme : DEFAULT_SETTINGS.theme,
     autoScrollSpeed: Math.round(clampNumber(settings.autoScrollSpeed, 1, 10, DEFAULT_SETTINGS.autoScrollSpeed)),
+    fontFamily: pickOption(settings.fontFamily, FONT_OPTIONS, DEFAULT_SETTINGS.fontFamily),
+    contentWidth: pickOption(settings.contentWidth, WIDTH_OPTIONS, DEFAULT_SETTINGS.contentWidth),
+    textIndent: pickBoolean(settings.textIndent, DEFAULT_SETTINGS.textIndent),
+    justify: pickBoolean(settings.justify, DEFAULT_SETTINGS.justify),
+    tapPaging: pickBoolean(settings.tapPaging, DEFAULT_SETTINGS.tapPaging),
+    statusBar: pickBoolean(settings.statusBar, DEFAULT_SETTINGS.statusBar),
   };
+}
+
+function pickOption(value, options, fallback) {
+  return options.some((option) => option.id === value) ? value : fallback;
+}
+
+function pickBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
 }
 
 export function normalizeLineEndings(content) {
@@ -131,6 +153,29 @@ export function findParagraphIndex(targetOffset, offsetMap) {
     }
   }
   return lo;
+}
+
+// Text shown for a bookmark: the anchor paragraph, plus following paragraphs
+// when it is too short to recognise on its own (e.g. a line of dialogue).
+export function buildExcerpt(paragraphs, index, maxLength = 80) {
+  const parts = [];
+  let length = 0;
+  for (let i = Math.max(0, index); i < (paragraphs || []).length && length < maxLength && parts.length < 3; i += 1) {
+    const text = String(paragraphs[i]?.text || "").trim();
+    if (!text) continue;
+    parts.push(text);
+    length += text.length;
+  }
+  return Array.from(parts.join(" ")).slice(0, maxLength).join("");
+}
+
+// Reading tap zones: the outer 30% on each side page backwards/forwards.
+export function tapZone(x, width) {
+  if (!Number.isFinite(x) || !Number.isFinite(width) || width <= 0) return "center";
+  const ratio = x / width;
+  if (ratio < 0.3) return "previous";
+  if (ratio > 0.7) return "next";
+  return "center";
 }
 
 export function formatSize(size) {

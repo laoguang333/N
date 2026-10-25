@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use sqlx::{Row, SqlitePool};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -28,12 +28,15 @@ use crate::{
         AnimeHistoryQuery, AnimeListQuery, AnimePathRequest, AnimeProgress, AnimeToolsStatus,
         AnimeTranscodeQuery, AnimeVideoSummary, AnimeWatchFinishRequest, AnimeWatchHistoryItem,
         AnimeWatchStartRequest, AnimeWatchStartResponse, BookContent, BookListQuery, BookSummary,
-        FolderSummary, PublicConfig, ReadingProgress, SaveAnimeProgressRequest,
-        SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfItem, ShelfResponse,
+        Bookmark, CreateBookmarkRequest, FolderSummary, PublicConfig, ReadingProgress,
+        SaveAnimeProgressRequest, SaveProgressRequest, SaveRatingRequest, ScanResult, ShelfItem,
+        ShelfResponse,
     },
 };
 
 const PARAGRAPH_POSITION_KIND: &str = "paragraph_utf16_lf_v1";
+const BOOKMARK_EXCERPT_MAX_CHARS: usize = 120;
+const BOOKMARK_CHAPTER_MAX_CHARS: usize = 60;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -49,6 +52,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_progress).put(save_progress).post(save_progress),
         )
         .route("/api/books/{id}/rating", put(save_rating))
+        .route(
+            "/api/books/{id}/bookmarks",
+            get(list_bookmarks).post(create_bookmark),
+        )
+        .route(
+            "/api/books/{id}/bookmarks/{bookmark_id}",
+            delete(delete_bookmark),
+        )
         .route("/api/library/scan", post(scan))
         .route("/api/anime/tools", get(anime_tools))
         .route("/api/anime/library/scan", post(scan_anime))
@@ -1562,6 +1573,123 @@ async fn save_rating(
     Ok(Json(fetch_book_summary(&state.db, id).await?))
 }
 
+async fn list_bookmarks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<Bookmark>>, AppError> {
+    require_book(&state.db, id).await?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, book_id, char_offset, percent, paragraph_fraction, excerpt, chapter_title, created_at
+        FROM bookmarks
+        WHERE book_id = ?1
+        ORDER BY char_offset ASC, percent ASC, id ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let bookmarks = rows
+        .into_iter()
+        .map(bookmark_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(bookmarks))
+}
+
+async fn create_bookmark(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<CreateBookmarkRequest>,
+) -> Result<Json<Bookmark>, AppError> {
+    require_book(&state.db, id).await?;
+
+    if payload.char_offset < 0 {
+        return Err(AppError::BadRequest(
+            "char_offset must not be negative".to_string(),
+        ));
+    }
+    if !payload.percent.is_finite() || !(0.0..=1.0).contains(&payload.percent) {
+        return Err(AppError::BadRequest(
+            "percent must be between 0 and 1".to_string(),
+        ));
+    }
+    if let Some(fraction) = payload.paragraph_fraction
+        && (!fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+    {
+        return Err(AppError::BadRequest(
+            "paragraph_fraction must be between 0 and 1".to_string(),
+        ));
+    }
+
+    let excerpt = truncate_chars(
+        payload.excerpt.as_deref().unwrap_or(""),
+        BOOKMARK_EXCERPT_MAX_CHARS,
+    );
+    let chapter_title = payload
+        .chapter_title
+        .as_deref()
+        .map(|title| truncate_chars(title, BOOKMARK_CHAPTER_MAX_CHARS))
+        .filter(|title| !title.is_empty());
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO bookmarks (book_id, char_offset, percent, paragraph_fraction, excerpt, chapter_title)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        RETURNING id, book_id, char_offset, percent, paragraph_fraction, excerpt, chapter_title, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(payload.char_offset)
+    .bind(payload.percent)
+    .bind(payload.paragraph_fraction)
+    .bind(excerpt)
+    .bind(chapter_title)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(bookmark_from_row(row)?))
+}
+
+async fn delete_bookmark(
+    State(state): State<Arc<AppState>>,
+    Path((id, bookmark_id)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = sqlx::query("DELETE FROM bookmarks WHERE id = ?1 AND book_id = ?2")
+        .bind(bookmark_id)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("bookmark not found".to_string()));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn bookmark_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Bookmark, sqlx::Error> {
+    Ok(Bookmark {
+        id: row.try_get("id")?,
+        book_id: row.try_get("book_id")?,
+        char_offset: row.try_get("char_offset")?,
+        percent: row.try_get("percent")?,
+        paragraph_fraction: row.try_get("paragraph_fraction")?,
+        excerpt: row.try_get("excerpt")?,
+        chapter_title: row.try_get("chapter_title")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value
+        .trim()
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
 async fn require_book(db: &SqlitePool, id: i64) -> Result<(String, String, String), AppError> {
     require_book_path(db, id).await.map_err(|error| {
         if error.to_string().contains("book not found") {
@@ -1717,7 +1845,7 @@ mod tests {
         AppState,
         config::Config,
         db::{connect_db, migrate},
-        models::{BookListQuery, SaveProgressRequest, SaveRatingRequest},
+        models::{BookListQuery, CreateBookmarkRequest, SaveProgressRequest, SaveRatingRequest},
     };
 
     use super::*;
@@ -1781,6 +1909,115 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(book.rating, None);
+
+        fixture.cleanup().await;
+    }
+
+    fn bookmark_request(char_offset: i64, percent: f64) -> CreateBookmarkRequest {
+        CreateBookmarkRequest {
+            char_offset,
+            percent,
+            paragraph_fraction: Some(0.25),
+            excerpt: Some(format!("  摘录 {char_offset}  ")),
+            chapter_title: Some("第一章".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn bookmarks_are_listed_by_position_and_deleted_per_book() {
+        let fixture = TestFixture::new("bookmarks").await;
+        let id = fixture.insert_book("Book", 0.25, None).await;
+        let other = fixture.insert_book("Other", 0.25, None).await;
+
+        let Json(late) = create_bookmark(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(bookmark_request(900, 0.9)),
+        )
+        .await
+        .unwrap();
+        let Json(early) = create_bookmark(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(bookmark_request(100, 0.1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(early.excerpt, "摘录 100");
+        assert_eq!(early.chapter_title.as_deref(), Some("第一章"));
+        assert_eq!(early.paragraph_fraction, Some(0.25));
+
+        let Json(listed) = list_bookmarks(State(fixture.state.clone()), Path(id))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|bookmark| bookmark.id)
+                .collect::<Vec<_>>(),
+            vec![early.id, late.id]
+        );
+
+        let error = delete_bookmark(State(fixture.state.clone()), Path((other, early.id)))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        let Json(deleted) = delete_bookmark(State(fixture.state.clone()), Path((id, early.id)))
+            .await
+            .unwrap();
+        assert_eq!(deleted["ok"], true);
+        let Json(listed) = list_bookmarks(State(fixture.state.clone()), Path(id))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, late.id);
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn create_bookmark_validates_position_and_truncates_text() {
+        let fixture = TestFixture::new("bookmark-validation").await;
+        let id = fixture.insert_book("Book", 0.25, None).await;
+
+        for request in [
+            bookmark_request(-1, 0.5),
+            bookmark_request(1, 1.5),
+            bookmark_request(1, f64::NAN),
+            CreateBookmarkRequest {
+                paragraph_fraction: Some(2.0),
+                ..bookmark_request(1, 0.5)
+            },
+        ] {
+            let error = create_bookmark(State(fixture.state.clone()), Path(id), Json(request))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::BadRequest(_)));
+        }
+
+        let error = create_bookmark(
+            State(fixture.state.clone()),
+            Path(id + 1000),
+            Json(bookmark_request(1, 0.5)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        let Json(bookmark) = create_bookmark(
+            State(fixture.state.clone()),
+            Path(id),
+            Json(CreateBookmarkRequest {
+                excerpt: Some("字".repeat(500)),
+                chapter_title: Some("   ".to_string()),
+                ..bookmark_request(1, 0.5)
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bookmark.excerpt.chars().count(), BOOKMARK_EXCERPT_MAX_CHARS);
+        assert_eq!(bookmark.chapter_title, None);
 
         fixture.cleanup().await;
     }

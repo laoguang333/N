@@ -59,6 +59,27 @@ pub struct SaveRatingRequest {
     pub rating: Option<i64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct Bookmark {
+    pub id: i64,
+    pub book_id: i64,
+    pub char_offset: i64,
+    pub percent: f64,
+    pub paragraph_fraction: Option<f64>,
+    pub excerpt: String,
+    pub chapter_title: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBookmarkRequest {
+    pub char_offset: i64,
+    pub percent: f64,
+    pub paragraph_fraction: Option<f64>,
+    pub excerpt: Option<String>,
+    pub chapter_title: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScanResult {
     pub scanned: usize,

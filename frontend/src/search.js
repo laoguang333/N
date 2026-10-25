@@ -3,6 +3,9 @@ function normalizeText(text) {
 }
 
 const SNIPPET_CONTEXT_LENGTH = 35;
+const CONTEXT_BEFORE_LENGTH = 40;
+const CONTEXT_AFTER_LENGTH = 64;
+const CONTEXT_MAX_PARAGRAPHS = 2;
 
 export function buildSearchIndex(paragraphs, explicitTotalLength) {
   const entries = [];
@@ -42,7 +45,8 @@ export function searchWithIndex(index, query) {
   const { entries, totalLength } = index;
   const results = [];
 
-  for (const entry of entries) {
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex];
     let fromIndex = 0;
     while (fromIndex <= entry.normalizedText.length) {
       const matchIndex = entry.normalizedText.indexOf(normalizedQuery, fromIndex);
@@ -61,6 +65,7 @@ export function searchWithIndex(index, query) {
       const snippetAfter = entry.text.slice(matchIndex + normalizedQuery.length, snippetEnd);
       results.push({
         id: `${entry.offset}-${matchIndex}-${results.length}`,
+        entryIndex,
         paragraphOffset: entry.offset,
         offset: absoluteOffset,
         percent: clampPercent(absoluteOffset / totalLength),
@@ -77,6 +82,69 @@ export function searchWithIndex(index, query) {
   }
 
   return results;
+}
+
+// Builds the text around a hit for display. Unlike the in-paragraph snippet,
+// this crosses paragraph boundaries so that short lines such as dialogue
+// still show what was written before and after them. Paragraph breaks are
+// returned as "\n" so the caller can render them as line breaks.
+export function buildSearchContext(index, result, options = {}) {
+  const entries = index?.entries || [];
+  const entryIndex = Number.isInteger(result?.entryIndex)
+    ? result.entryIndex
+    : entries.findIndex((entry) => entry.offset === result?.paragraphOffset);
+  const entry = entries[entryIndex];
+  if (!entry || !result) {
+    return {
+      before: result?.snippetBefore || "",
+      match: result?.snippetMatch || "",
+      after: result?.snippetAfter || "",
+      clippedStart: false,
+      clippedEnd: false,
+    };
+  }
+
+  const beforeLength = options.before ?? CONTEXT_BEFORE_LENGTH;
+  const afterLength = options.after ?? CONTEXT_AFTER_LENGTH;
+  const maxParagraphs = options.maxParagraphs ?? CONTEXT_MAX_PARAGRAPHS;
+
+  const beforeParts = [];
+  let budget = beforeLength;
+  let cursor = entryIndex;
+  let start = safeSliceStart(entry.text, Math.max(0, result.matchStart - budget));
+  beforeParts.push(entry.text.slice(start, result.matchStart));
+  budget -= result.matchStart - start;
+  while (start === 0 && budget > 0 && cursor > 0 && entryIndex - cursor < maxParagraphs) {
+    cursor -= 1;
+    const text = entries[cursor].text;
+    start = safeSliceStart(text, Math.max(0, text.length - budget));
+    beforeParts.unshift(text.slice(start));
+    budget -= text.length - start;
+  }
+  const clippedStart = start > 0 || cursor > 0;
+
+  const afterParts = [];
+  budget = afterLength;
+  cursor = entryIndex;
+  let end = safeSliceEnd(entry.text, Math.min(entry.text.length, result.matchEnd + budget));
+  afterParts.push(entry.text.slice(result.matchEnd, end));
+  budget -= end - result.matchEnd;
+  while (end === entries[cursor].text.length && budget > 0 && cursor < entries.length - 1 && cursor - entryIndex < maxParagraphs) {
+    cursor += 1;
+    const text = entries[cursor].text;
+    end = safeSliceEnd(text, Math.min(text.length, budget));
+    afterParts.push(text.slice(0, end));
+    budget -= end;
+  }
+  const clippedEnd = end < entries[cursor].text.length || cursor < entries.length - 1;
+
+  return {
+    before: beforeParts.join("\n"),
+    match: entry.text.slice(result.matchStart, result.matchEnd),
+    after: afterParts.join("\n"),
+    clippedStart,
+    clippedEnd,
+  };
 }
 
 export function searchParagraphs(paragraphs, query) {
@@ -128,6 +196,17 @@ export function highlightParagraph(text, matches, activeId = "") {
   }
 
   return parts;
+}
+
+// Avoid splitting a UTF-16 surrogate pair at the edge of a context slice.
+function safeSliceStart(text, start) {
+  const code = text.charCodeAt(start);
+  return start > 0 && code >= 0xdc00 && code <= 0xdfff ? start + 1 : start;
+}
+
+function safeSliceEnd(text, end) {
+  const code = text.charCodeAt(end - 1);
+  return end < text.length && code >= 0xd800 && code <= 0xdbff ? end - 1 : end;
 }
 
 function clampPercent(value) {
